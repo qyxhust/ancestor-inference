@@ -1,0 +1,23 @@
+project:
+  seed: 42
+  outdir: "data"
+
+msprime:
+  k: 5
+  N_perpop: 50
+  ne: 1000
+  mu: 1e-8
+  rec: 1e-8
+  seed: 42
+  l: 100000
+  model: "hudson"
+
+reads:
+  depth: 10            # 目标覆盖度
+  read_len: 150
+  err: 0.001
+  insert_mean: 350
+  insert_sd: 35
+  # L: 12000000        # 可省略，默认用 msprime.l
+  # samples: ["ind0001","ind0002"]  # 不写则自动从 VCF 头部读取
+  # max_samples: 10
