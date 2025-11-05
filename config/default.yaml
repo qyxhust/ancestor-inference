@@ -3,10 +3,9 @@ project:
   outdir: "data"
 
 msprime:
-  k: 5
-  N_perpop: 50
-  ne: 1000
-  mu: 1e-8
+  N_perpop: 100
+  ne: 10000
+  mu: 2e-8
   rec: 1e-8
   seed: 42
   l: 100000

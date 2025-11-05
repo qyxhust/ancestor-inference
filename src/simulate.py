@@ -3,53 +3,65 @@ from pathlib import Path
 import subprocess, tempfile, io
 
 # build a demography with K isolated populations have same ancestor
-def build_demography(k, ne):
+# model ID = OutOfAfricaExtendedNeandertalAdmixturePulse_3I21
+# description: Three population out-of-Africa with an extended pulse of Neandertal admixture into Europeans
+def year_to_gen(kya, gen_time=29):
+    return int(round(kya * 1000.0 / gen_time))
+
+def build_demography(ne):
     dem = msprime.Demography()
-    dem.add_population(name="ancestral", initial_size=ne)
-    for p in range(k):
-        dem.add_population(name=f"pop{p}", initial_size=ne)
+
+    # add populations
+    dem.add_population(name="YRI", initial_size=ne)
+    dem.add_population(name="CEU", initial_size=ne)
+    dem.add_population(name="Neandertal", initial_size=ne)
+    dem.add_population(name="Root", initial_size=ne)
+    dem.add_population(name="Ancestral", initial_size=ne)
+
+    # time point
+    Tnsplit = year_to_gen(290) # split Neandertal and modern humans
+    Tooa = year_to_gen(73.95)     # out of Africa
+    Tnstart = year_to_gen(50)  # Neandertal admixture start
+    Tnend = year_to_gen(30)    # Neandertal end admixture
+
+    # population split events
     dem.add_population_split(
-        time=5000,
-        derived=[f"pop{i}" for i in range(k)],
-        ancestral="ancestral",
+        time=Tooa,
+        derived=["YRI", "CEU"],
+        ancestral="Ancestral",
     )
+
+    dem.add_population_split(
+        time=Tnsplit,
+        derived=['Neandertal', 'Ancestral'],
+        ancestral="Root",
+    )
+
+    dem.add_symmetric_migration_rate_change(
+        time=Tnstart,
+        populations=["CEU", "Neandertal"],
+        rate=0.029,
+    )
+
+    dem.add_symmetric_migration_rate_change(
+        time=Tnend,
+        populations=["CEU", "Neandertal"],
+        rate=0.0,
+    )
+
     print(f"Demography build")
     return dem
 
-# 生成长度为 L、全部为 'A' 的参考 FASTA，并用 samtools 建索引
-from pathlib import Path
-import subprocess
-
-def write_allA_ref(L, ref_path: Path, chrom="1"):
-    """
-    L: 参考序列长度（int，如 100_000）
-    ref_path: 输出 FASTA 路径（Path，如 Path("data/simulate/ref.fa")）
-    chrom: FASTA 头名（需与 VCF 的 CHROM 一致，默认 '1'）
-    """
-    ref_path.parent.mkdir(parents=True, exist_ok=True)
-
-    # 按 60 列换行写入（常见 FASTA 风格）
-    with open(ref_path, "w") as f:
-        f.write(f">{chrom}\n")
-        row = "A" * 60
-        full_len = int(L)
-        # 写满 L 个 'A'
-        for i in range(0, full_len, 60):
-            end = i + 60
-            if end <= full_len:
-                f.write(row + "\n")
-            else:
-                f.write("A" * (full_len - i) + "\n")
-
 
 def simulate_vcf_bgzf(
-    dem, k, N_perpop, mu, rec, seed, l, model,
-    vcf_path, label_path, ref_path
+    dem, N_perpop, mu, rec, seed, l, model,
+    vcf_path, label_path
 ):
     # Set up the simulation parameters
-    samples = [msprime.SampleSet(N_perpop, population=p, ploidy=2) for p in range(k)]
+    samples = [msprime.SampleSet(N_perpop, population=p, ploidy=2) for p in ["YRI", "CEU", "Neandertal"]]
     print(f"Samples → \n {samples}")
 
+    dem.sort_events()
     #simulate
     ts_anc = msprime.sim_ancestry(
         samples=samples,
@@ -57,15 +69,12 @@ def simulate_vcf_bgzf(
         sequence_length=l,
         recombination_rate=rec,
         model=model,
-        random_seed=42,
+        random_seed=seed,
     )
 
     #mutation
     ts = msprime.sim_mutations(
         ts_anc, rate=mu, model=msprime.JC69(), random_seed=seed)
-    
-    #write reference fasta
-    write_allA_ref(l, ref_path, chrom="1")
     
     #write bgzf vcf
     out_gz = Path(f"{vcf_path}.gz")  
@@ -78,12 +87,15 @@ def simulate_vcf_bgzf(
         if ret != 0:
             raise RuntimeError("bgzip failed while compressing VCF")
         
-    #output labels
+    # output labels
     with open(label_path, "w") as w:
         w.write("sample\tpopulation\n")
         for i, ind in enumerate(ts.individuals()):
-            pop = ts.node(ind.nodes[0]).population
-            w.write(f"tsk_{i}\tpop{pop}\n")
+            pop_id = ts.node(ind.nodes[0]).population   # 整数 id
+            # 从 TreeSequence 里取这个种群的名字；如果没有名字就退回到 pop{id}
+            pop_name = ts.population(pop_id).metadata.get("name", f"pop{pop_id}")
+            w.write(f"tsk_{i}\t{pop_name}\n")
+
 
     print('simulation done.')
     
