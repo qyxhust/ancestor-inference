@@ -10,11 +10,12 @@ sys.path.insert(0, str(ROOT))
 from scripts.run_simulate import run_simulate  # 你的函数，内部已内置 cfg_path
 from scripts.run_read import run_read          # 你的函数，内部已内置 cfg_path
 
+
 def main():
     run_simulate()
     print("[OK] Pipeline complete.")
-    #run_read()
-    #print("[OK] Read simulation complete.")
+    run_read()
+    print("[OK] Read simulation complete.")
 
 if __name__ == "__main__":
     main()

@@ -1,6 +1,11 @@
 project:
   seed: 42
-  outdir: "data"
+  simulate_label: "data/simulate/labels.tsv"
+  simulate_vcfs: "data/simulate/truth.vcf.gz"
+  simulate_vcf_idx: "data/simulate/truth.vcf.gz.tbi"
+  read_all : "data/reads/all_samples.fa"
+  reads : "data/reads/"
+
 
 msprime:
   N_perpop: 100
@@ -17,6 +22,4 @@ reads:
   err: 0.001
   insert_mean: 350
   insert_sd: 35
-  # L: 12000000        # 可省略，默认用 msprime.l
-  # samples: ["ind0001","ind0002"]  # 不写则自动从 VCF 头部读取
-  # max_samples: 10
+  l: 100000      # 可省略，默认用 msprime.l

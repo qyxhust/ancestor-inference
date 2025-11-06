@@ -4,7 +4,6 @@ from src.simulate import build_demography, simulate_vcf_bgzf
 
 def run_simulate():
     cfg  = yaml.safe_load(Path("config/default.yaml").read_text())
-    outdir = cfg['project']['outdir']
 
     params = cfg['msprime']
     dem = build_demography(
@@ -18,8 +17,8 @@ def run_simulate():
         seed=params['seed'],
         l=params['l'],
         model="hudson",
-        vcf_path=Path(outdir) / "simulate" / "truth.vcf",
-        label_path=Path(outdir) / "simulate" / "labels.tsv",
+        vcf_path= cfg['project']['simulate_vcfs'],
+        label_path= cfg['project']['simulate_label'],
     )
     print("[OK] Simulation complete.")
     

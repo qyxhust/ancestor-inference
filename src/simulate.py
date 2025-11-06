@@ -1,6 +1,7 @@
 import msprime, tskit
 from pathlib import Path
 import subprocess, tempfile, io
+import pysam
 
 # build a demography with K isolated populations have same ancestor
 # model ID = OutOfAfricaExtendedNeandertalAdmixturePulse_3I21
@@ -77,15 +78,16 @@ def simulate_vcf_bgzf(
         ts_anc, rate=mu, model=msprime.JC69(), random_seed=seed)
     
     #write bgzf vcf
-    out_gz = Path(f"{vcf_path}.gz")  
-
-    with open(out_gz, "wb") as fout:
+ 
+    with open(vcf_path, "wb") as fout:
         proc = subprocess.Popen(["bgzip", "-c"], stdin=subprocess.PIPE, stdout=fout)
         with io.TextIOWrapper(proc.stdin, encoding="utf-8") as pipe:
             ts.write_vcf(pipe)
         ret = proc.wait()
         if ret != 0:
             raise RuntimeError("bgzip failed while compressing VCF")
+        
+    pysam.tabix_index(str(vcf_path), preset="vcf", force=True)
         
     # output labels
     with open(label_path, "w") as w:
