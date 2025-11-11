@@ -3,8 +3,7 @@ project:
   simulate_label: "data/simulate/labels.tsv"
   simulate_vcfs: "data/simulate/truth.vcf.gz"
   simulate_vcf_idx: "data/simulate/truth.vcf.gz.tbi"
-  read_all : "data/reads/all_samples.fa"
-  reads : "data/reads/"
+  reads : "data/reads"
 
 
 msprime:
@@ -17,7 +16,6 @@ msprime:
   model: "hudson"
 
 reads:
-  depth: 10            # 目标覆盖度
   read_len: 150
   err: 0.001
   insert_mean: 350

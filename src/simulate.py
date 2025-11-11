@@ -78,6 +78,9 @@ def simulate_vcf_bgzf(
         ts_anc, rate=mu, model=msprime.JC69(), random_seed=seed)
     
     #write bgzf vcf
+    
+    vcf_path = Path(vcf_path)
+    vcf_path.parent.mkdir(parents=True, exist_ok=True)
  
     with open(vcf_path, "wb") as fout:
         proc = subprocess.Popen(["bgzip", "-c"], stdin=subprocess.PIPE, stdout=fout)

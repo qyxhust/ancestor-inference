@@ -1,173 +1,375 @@
-
-from pathlib import Path
-import pysam
-import numpy as np
+import math
 import subprocess
-import pysam
-import numpy as np
 from pathlib import Path
+from typing import Iterable, List, Optional, Tuple
+
+import numpy as np
+import pandas as pd
+import pysam
 import textwrap
 
 
 class SequencingRead:
-    def __init__(self, vcf_path: str, L: int, fasta_path: str, chrom: str = None):
+    """
+    一条龙功能：
+      1. 生成一条全局随机 ATGC 序列（base_random）
+      2. 用 VCF 的 REF 覆盖所有 SNP -> 全局 ref_array
+      3. 对每个样本，在 ref_array 基础上按 GT 改 ALT -> hap1/hap2
+      4. 75% reference 样本的 hap 合并写到一个总 FASTA（EM 参考库）
+      5. 25% test 样本：每个样本一个目录，写 sample.fa + wgsim 双端 reads
+    """
+
+    def __init__(
+        self,
+        vcf_path: str,
+        L: int,
+        read_root: str,
+        chrom: str = "1",
+        test_table: Optional[str] = None,
+        sample_col: str = "sample",
+        pop_col: str = "population",
+        sep: str = ",",
+        seed: int = 42,
+    ):
         """
-        vcf_path: msprime 生成的 VCF
-        L: 序列长度（需要 >= VCF 中最大坐标）
-        out_dir: 输出目录（FASTA / 以后 wgsim 输出）
-        chrom: 要处理的染色体名；如果 None，就用 VCF 中第一条
+        vcf_path : msprime 生成的 VCF
+        L        : 序列长度（>= VCF 中最大坐标）
+        read_root: 输出的根目录（下面会有 reads/<sample>/ 等）
+        chrom    : 处理的染色体
+        test_table: 测试样本列表（TSV/CSV, 至少含 sample_col + pop_col）
+                    -> 只对这些样本做测序（25%）
+        seed     : 随机种子，用于生成基础随机序列
         """
-        self.vcf_path = vcf_path
-        self.L = L
-        self.fasta_path = Path(fasta_path)
+        self.vcf_path = Path(vcf_path)
+        self.L = int(L)
+        self.read_root = Path(read_root)  # 一般用 "data/reads"
+        self.chrom = chrom
 
+        self.vcf = pysam.VariantFile(str(self.vcf_path))
+        self.all_samples: List[str] = list(self.vcf.header.samples)
 
-        self.vcf = pysam.VariantFile(vcf_path)
-        self.samples = list(self.vcf.header.samples)
+        # 载入 test/reference 划分
+        if test_table is not None:
+            meta = pd.read_csv(test_table, sep=sep)
+            meta = meta[[sample_col, pop_col]].drop_duplicates()
+            meta = meta.rename(columns={sample_col: "sample", pop_col: "population"})
+            self.meta = meta
+            self.test_samples = set(meta["sample"])
+        else:
+            self.meta = pd.DataFrame({"sample": self.all_samples, "population": "UNKNOWN"})
+            self.test_samples = set(self.all_samples)
 
-        self.chrom = "1"
+        self.reference_samples = [s for s in self.all_samples if s not in self.test_samples]
 
-    def _build_ref_array(self):
+        print(f"[INFO] VCF samples total = {len(self.all_samples)}")
+        print(f"[INFO] reference samples = {len(self.reference_samples)}, "
+              f"test samples = {len(self.test_samples)}")
+
+        # ===== 核心三步：随机基础序列 -> REF 覆盖 =====
+        self.rng = np.random.default_rng(seed)
+        self.base_random_array = self._build_base_random_array()
+        self.ref_array = self._build_ref_array_from_vcf()
+
+    # =====================================================
+    #  功能 1：生成一条随机 ATGC 序列（只生成一次）
+    # =====================================================
+
+    def _build_base_random_array(self) -> np.ndarray:
         """
-        构建参考序列数组：
-        1. 初始全 A
-        2. 在所有变异位点上用 REF 覆盖
-        返回: numpy array, 长度 L, 元素是单个字符 'A','C','G','T'
+        生成长度为 L 的随机 ATGC 序列：
+        - 只在 __init__ 里调用一次
+        - 后续所有 ref/hap 都基于同一条序列
         """
-        ref_array = np.full(self.L, "A", dtype="U1")
+        bases = np.array(list("ATGC"))
+        idx = self.rng.integers(0, 4, size=self.L)
+        base_random = bases[idx]
+        print("[INFO] base_random_array generated.")
+        return base_random
 
-        # 重新打开 VCF，避免 self.vcf 已经被迭代过的问题
-        vcf = pysam.VariantFile(self.vcf_path)
-        for rec in vcf.fetch(self.chrom):
-            # 这里只处理 SNP（单碱基 REF）
+    # =====================================================
+    #  功能 2：用 VCF 中的 REF 覆盖 SNP -> 全局 ref_array
+    # =====================================================
+
+    def _build_ref_array_from_vcf(self) -> np.ndarray:
+        """
+        在 base_random_array 基础上，用 VCF 中的 REF 覆盖所有 SNP 位点，
+        得到全局参考序列 ref_array。
+        """
+        ref_array = self.base_random_array.copy()
+        vcf = pysam.VariantFile(str(self.vcf_path))
+
+        try:
+            iterator = vcf.fetch(self.chrom)
+        except (ValueError, TypeError):
+            iterator = vcf
+
+        for rec in iterator:
+            if rec.contig != self.chrom:
+                continue
             if len(rec.ref) != 1:
                 continue
-            pos = rec.pos - 1  # VCF 1-based -> 0-based
+
+            pos = rec.pos - 1  # 1-based -> 0-based
             if 0 <= pos < self.L:
                 ref_array[pos] = rec.ref
 
+        print("[INFO] ref_array built from VCF REF.")
         return ref_array
-    
-    def write_all_sample_haplotypes_fasta(self,
-                                        line_width: int = 100):
+
+    # =====================================================
+    #  功能 3：对单个样本生成 hap1 / hap2（基于 ref_array）
+    # =====================================================
+
+    def _build_sample_haplotypes(self, sample: str) -> Tuple[np.ndarray, np.ndarray]:
         """
-        基于 VCF 和参考序列，为每个样本构建两条 haplotype，
-        不在类里保存大数组，按“一个样本一处理一写入”的方式写入同一个 FASTA：
-
-        >sample_hap1
-        SEQUENCE...
-        >sample_hap2
-        SEQUENCE...
+        对单个样本：
+          - 从 ref_array 拷贝两份
+          - 按该样本的 GT，把 SNP 位点替换成 ALT
+        返回：hap1_array, hap2_array
         """
-        # 1. 构建参考序列数组（全 A -> 用 REF 覆盖 SNP 位点）
-        base_ref_array = self._build_ref_array()
-        vcf = pysam.VariantFile(self.vcf_path)
+        if sample not in self.all_samples:
+            raise ValueError(f"Sample {sample} not found in VCF.")
 
-        with open(self.fasta_path, "w") as f_out:
+        hap1 = self.ref_array.copy()
+        hap2 = self.ref_array.copy()
 
-            # ===== 外层：按样本遍历 =====
-            for s in self.samples:
-                # 为当前样本准备两条 haplotype（初始都是 REF）
-                hap1 = base_ref_array.copy()
-                hap2 = base_ref_array.copy()
+        vcf = pysam.VariantFile(str(self.vcf_path))
+        try:
+            iterator = vcf.fetch(self.chrom)
+        except (ValueError, TypeError):
+            iterator = vcf
 
-                # ===== 内层：遍历所有 SNP 位点，更新当前样本的 hap1/2 =====
-                for rec in vcf.fetch(self.chrom):
-                    if rec.contig != self.chrom:
-                        continue
-                    # 只处理 SNP
-                    if len(rec.ref) != 1:
-                        continue
+        for rec in iterator:
+            if rec.contig != self.chrom:
+                continue
+            if len(rec.ref) != 1:
+                continue
 
-                    pos = rec.pos - 1
-                    if not (0 <= pos < self.L):
-                        continue
+            pos = rec.pos - 1
+            if not (0 <= pos < self.L):
+                continue
 
-                    alts = rec.alts  # 例如 ('C',) 或 ('C','G')
-                    if not alts:
-                        continue
+            alts = rec.alts
+            if not alts:
+                continue
 
-                    sample_data = rec.samples[s]
-                    gt = sample_data.get("GT", None)  # 例如 (0,1) / (1,1) / (0,0)
-                    if gt is None:
-                        continue
+            sample_data = rec.samples[sample]
+            gt = sample_data.get("GT", None)  # (0,1),(1,1)...
+            if gt is None:
+                continue
 
-                    # hap_idx: 0 -> hap1, 1 -> hap2
-                    for hap_idx, allele_index in enumerate(gt):
-                        if allele_index is None or allele_index == 0:
-                            # None 或 0（REF）都不用改
-                            continue
+            for hap_idx, allele_index in enumerate(gt):
+                if allele_index is None or allele_index == 0:
+                    continue  # REF
+                if allele_index - 1 >= len(alts):
+                    continue
 
-                        # ALT 等位基因（1 -> alts[0], 2 -> alts[1], ...）
-                        if allele_index - 1 >= len(alts):
-                            continue
-                        alt_base = alts[allele_index - 1]
-                        if len(alt_base) != 1:
-                            # 非 SNP（indel）这里直接跳过
-                            continue
+                alt_base = alts[allele_index - 1]
+                if len(alt_base) != 1:
+                    continue  # 跳过 indel
 
-                        if hap_idx == 0:
-                            hap1[pos] = alt_base
-                        else:  # hap_idx == 1
-                            hap2[pos] = alt_base
+                if hap_idx == 0:
+                    hap1[pos] = alt_base
+                else:
+                    hap2[pos] = alt_base
 
-                # ===== 当前样本的所有 SNP 都更新完，写入 FASTA =====
+        return hap1, hap2
+
+    # =====================================================
+    #  写 FASTA 的小工具
+    # =====================================================
+
+    @staticmethod
+    def _write_two_haps_to_fasta(
+        sample: str,
+        hap1: np.ndarray,
+        hap2: np.ndarray,
+        out_fa: Path,
+        line_width: int = 100,
+    ):
+        seq1 = "".join(hap1)
+        seq2 = "".join(hap2)
+        out_fa.parent.mkdir(parents=True, exist_ok=True)
+
+        with open(out_fa, "w") as f:
+            f.write(f">{sample}_hap1\n")
+            for chunk in textwrap.wrap(seq1, line_width):
+                f.write(chunk + "\n")
+
+            f.write(f">{sample}_hap2\n")
+            for chunk in textwrap.wrap(seq2, line_width):
+                f.write(chunk + "\n")
+
+    # =====================================================
+    #  4a. 写 75% reference：合并到一个总 FASTA（EM 参考库）
+    # =====================================================
+
+    def write_reference_haplotypes_merged(self, out_fa: str):
+        """
+        把 75% reference 样本的 hap 全部写到一个大 FASTA 里：
+        data/ref_haps.fa
+
+        >sampleA_hap1
+        ...
+        >sampleA_hap2
+        ...
+        """
+        ref_samples = self.test_samples
+        out_path = Path(out_fa)
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+
+        with open(out_path, "w") as f_out:
+            for s in ref_samples:
+                hap1, hap2 = self._build_sample_haplotypes(s)
                 seq1 = "".join(hap1)
                 seq2 = "".join(hap2)
 
-                f_out.write(f">{s}_hap1\n")
-                for chunk in textwrap.wrap(seq1, line_width):
-                    f_out.write(chunk + "\n")
+                f_out.write(f">{s}_hap1\n{seq1}\n")
+                f_out.write(f">{s}_hap2\n{seq2}\n")
 
-                f_out.write(f">{s}_hap2\n")
-                for chunk in textwrap.wrap(seq2, line_width):
-                    f_out.write(chunk + "\n")
+                print(f"[INFO] appended haplotypes of {s} to {out_fa}")
 
-        print(f"[INFO] Written all samples haplotypes to {self.fasta_path}")
+        print(f"[OK] reference haplotypes merged -> {out_fa}")
 
-    
-    #     使用 subprocess 调用 wgsim，对 all_samples.fa 生成 fastq
-    def run_wgsim(self,
-                fasta_name: str = "all_samples.fa",
-                out_prefix: str = "reads",
-                N: int = 100000,
-                read_len: int = 150,
-                err: float = 0.001,
-                seed: int = 42,
-                wgsim_path: str = "wgsim"):
+    # =====================================================
+    #  4b. 写 25% test：每个样本一个目录 + fasta
+    # =====================================================
+
+    def write_test_haplotypes_per_sample(self, line_width: int = 100):
         """
-        调用 wgsim 对 FASTA 做测序模拟（成对 reads）。
-
-        参数：
-        - fasta_name: 之前写出的 FASTA 文件名（在 out_dir 下面）
-        - out_prefix: 输出 fastq 的前缀，生成 out_prefix_R1.fq / out_prefix_R2.fq
-        - N: 需要模拟的 read 对数（wgsim -N）
-        - read_len: read 长度（-1 和 -2 都用这个长度）
-        - err: 测序错误率 (-e)
-        - seed: 随机数种子 (-S)
-        - wgsim_path: wgsim 可执行文件路径（在 PATH 里就直接用 "wgsim"）
+        为 25% test 样本写单独的 FASTA：
+        data/reads/<sample>/<sample>.fa
         """
-        fasta_path = self.out_dir / fasta_name
-        r1_path = self.out_dir / f"{out_prefix}_R1.fq"
-        r2_path = self.out_dir / f"{out_prefix}_R2.fq"
+        for s in self.test_samples:
+            hap1, hap2 = self._build_sample_haplotypes(s)
 
-        cmd = [
-            wgsim_path,
-            "-N", str(N),
-            "-1", str(read_len),
-            "-2", str(read_len),
-            "-e", str(err),
-            "-S", str(seed),
-            str(fasta_path),
-            str(r1_path),
-            str(r2_path),
-        ]
+            sample_dir = self.read_root / s    # 比如 data/reads/tsk_0
+            fasta_path = sample_dir / f"{s}.fa"
 
-        print("[INFO] Running wgsim:")
-        print("      " + " ".join(cmd))
+            self._write_two_haps_to_fasta(
+                sample=s,
+                hap1=hap1,
+                hap2=hap2,
+                out_fa=fasta_path,
+                line_width=line_width,
+            )
 
-        subprocess.run(cmd, check=True)
+            print(f"[INFO] written test haplotypes for {s} -> {fasta_path}")
 
-        print(f"[OK] wgsim finished. Output:")
-        print(f"     {r1_path}")
-        print(f"     {r2_path}")
+    # =====================================================
+    #  5. 对 25% test 样本跑 wgsim（双端）
+    # =====================================================
+
+    def run_wgsim_for_tests(
+        self,
+        depth: float,
+        read_len: int = 120,
+        insert_mean: int = 300,
+        insert_sd: int = 50,
+        err: float = 0.001,
+        seed: int = 42,
+        wgsim_path: str = "wgsim",
+    ):
+        """
+        只对 25% test 样本调用 wgsim，生成双端 reads：
+
+        data/reads/<sample>/<sample>_R1.fq
+        data/reads/<sample>/<sample>_R2.fq
+
+        depth: 每个样本目标测序深度（近似 2L 上的平均深度）
+        """
+        L = self.L
+
+        for s in self.test_samples:
+            sample_dir = self.read_root / s
+            fasta_path = sample_dir / f"{s}.fa"
+            r1_path = sample_dir / f"{s}_R1.fq"
+            r2_path = sample_dir / f"{s}_R2.fq"
+
+            if not fasta_path.exists():
+                print(f"[WARN] {fasta_path} not found, skip {s}")
+                continue
+
+            # 二倍体总长度 ~ 2L，每对 PE read 覆盖 ~2*read_len
+            # 目标覆盖 depth * 2L
+            # N_pairs ≈ depth * 2L / (2*read_len) = depth * L / read_len
+            N_pairs = math.ceil(depth * L / read_len)
+            print(f"[INFO] wgsim for {s}: depth={depth}, L={L}, N_pairs={N_pairs}")
+
+            cmd = [
+                wgsim_path,
+                "-N", str(N_pairs),
+                "-1", str(read_len),
+                "-2", str(read_len),
+                "-e", str(err),
+                "-r", "0",
+                "-R", "0",
+                "-X", "0",
+                "-d", str(insert_mean),
+                "-s", str(insert_sd),
+                "-S", str(seed),
+                str(fasta_path),
+                str(r1_path),
+                str(r2_path),
+            ]
+            print("      " + " ".join(cmd))
+            subprocess.run(cmd, check=True)
+
+            print(f"[OK] wgsim finished for {s}:")
+            print(f"     {r1_path}")
+            print(f"     {r2_path}")
+
+import pandas as pd
+from typing import List, Tuple
+
+def stratified_split_samples_pd(
+    meta_path: str,
+    ref_out: str,
+    test_out: str,
+    ref_ratio: float = 0.75,
+    seed: int = 42,
+    sample_col: str = "sample",
+    pop_col: str = "population",
+    sep: str = "\t",
+) -> Tuple[pd.DataFrame, pd.DataFrame]:
+    """
+    用 pandas 按群体(pop_col)分层，把样本划分为参考集(ref)和测试集(test)，
+    并把样本及其对应种群一起写到输出文件中。
+
+    输出文件格式（TSV）：
+    sample_id <tab> population
+
+    返回
+    ----
+    (ref_df, test_df) 两个 DataFrame，只包含 sample_col 和 pop_col 两列
+    """
+    # 读入样本表
+    df = pd.read_csv(meta_path, sep=sep)
+
+    # 为了可复现，先整体打乱
+    df = df.sample(frac=1.0, random_state=seed).reset_index(drop=True)
+
+    ref_indices = []
+    test_indices = []
+
+    # 按群体分组，分别做 75/25 划分
+    for pop, sub in df.groupby(pop_col):
+        n = len(sub)
+        n_ref = int(round(n * ref_ratio))
+
+        ref_indices.extend(sub.index[:n_ref].tolist())
+        test_indices.extend(sub.index[n_ref:].tolist())
+
+        print(f"[INFO] pop={pop}: total={n}, ref={n_ref}, test={n - n_ref}")
+
+    ref_df = df.loc[ref_indices, [sample_col, pop_col]].reset_index(drop=True)
+    test_df = df.loc[test_indices, [sample_col, pop_col]].reset_index(drop=True)
+
+    # 写出：两列 sample_id + population
+    ref_df.to_csv(ref_out, index=False)
+    test_df.to_csv(test_out, index=False)
+
+    print(f"[OK] reference list -> {ref_out}")
+    print(f"[OK] test list      -> {test_out}")
+
+    return ref_df, test_df
