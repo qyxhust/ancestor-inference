@@ -214,7 +214,7 @@ class SequencingRead:
         >sampleA_hap2
         ...
         """
-        ref_samples = self.test_samples
+        ref_samples = self.reference_samples
         out_path = Path(out_fa)
         out_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -253,8 +253,6 @@ class SequencingRead:
                 out_fa=fasta_path,
                 line_width=line_width,
             )
-
-            print(f"[INFO] written test haplotypes for {s} -> {fasta_path}")
 
     # =====================================================
     #  5. 对 25% test 样本跑 wgsim（双端）
@@ -312,12 +310,8 @@ class SequencingRead:
                 str(r1_path),
                 str(r2_path),
             ]
-            print("      " + " ".join(cmd))
             subprocess.run(cmd, check=True)
 
-            print(f"[OK] wgsim finished for {s}:")
-            print(f"     {r1_path}")
-            print(f"     {r2_path}")
 
 import pandas as pd
 from typing import List, Tuple

@@ -26,7 +26,7 @@ def run_read():
     seq.write_test_haplotypes_per_sample()
 
     # 3) 对 25% test 样本跑双端 wgsim
-    seq.run_wgsim_for_tests(depth=10.0)
+    seq.run_wgsim_for_tests(depth=cfg["reads"]["depth"])
 
 
 

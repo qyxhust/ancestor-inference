@@ -21,3 +21,4 @@ reads:
   insert_mean: 350
   insert_sd: 35
   l: 100000      # 可省略，默认用 msprime.l
+  depth: 10.0
