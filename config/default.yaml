@@ -1,17 +1,16 @@
 project:
   seed: 42
-  simulate_label: "data/simulate/labels.tsv"
-  simulate_vcfs: "data/simulate/truth.vcf.gz"
-  simulate_vcf_idx: "data/simulate/truth.vcf.gz.tbi"
-  reads : "data/reads"
+  simulate_label: "/space/s1/qyx/data/simulate/labels.tsv"
+  simulate_vcfs: "/space/s1/qyx/data/simulate/truth.vcf.gz"
+  simulate_vcf_idx: "/space/s1/qyx/data/simulate/truth.vcf.gz.tbi"
+  reads : "/space/s1/qyx/data/reads"
 
 
 msprime:
   N_perpop: 100
-  ne: 10000
-  mu: 2e-8
-  rec: 1e-8
+  ploidy: 2
   seed: 42
+  left: 0
   l: 100000
   model: "hudson"
 

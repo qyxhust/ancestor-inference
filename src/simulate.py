@@ -4,84 +4,20 @@ import subprocess, tempfile, io
 import pysam
 
 # build a demography with K isolated populations have same ancestor
+# model 1: mornal
 # model ID = OutOfAfricaExtendedNeandertalAdmixturePulse_3I21
+#model 2: hard
+# model ID = 
+#model 3: admix
+# model ID = AmericanAdmixture_4B18
 # description: Three population out-of-Africa with an extended pulse of Neandertal admixture into Europeans
-def year_to_gen(kya, gen_time=29):
-    return int(round(kya * 1000.0 / gen_time))
-
-def build_demography(ne):
-    dem = msprime.Demography()
-
-    # add populations
-    dem.add_population(name="YRI", initial_size=ne)
-    dem.add_population(name="CEU", initial_size=ne)
-    dem.add_population(name="Neandertal", initial_size=ne)
-    dem.add_population(name="Root", initial_size=ne)
-    dem.add_population(name="Ancestral", initial_size=ne)
-
-    # time point
-    Tnsplit = year_to_gen(290) # split Neandertal and modern humans
-    Tooa = year_to_gen(73.95)     # out of Africa
-    Tnstart = year_to_gen(50)  # Neandertal admixture start
-    Tnend = year_to_gen(30)    # Neandertal end admixture
-
-    # population split events
-    dem.add_population_split(
-        time=Tooa,
-        derived=["YRI", "CEU"],
-        ancestral="Ancestral",
-    )
-
-    dem.add_population_split(
-        time=Tnsplit,
-        derived=['Neandertal', 'Ancestral'],
-        ancestral="Root",
-    )
-
-    dem.add_symmetric_migration_rate_change(
-        time=Tnstart,
-        populations=["CEU", "Neandertal"],
-        rate=0.029,
-    )
-
-    dem.add_symmetric_migration_rate_change(
-        time=Tnend,
-        populations=["CEU", "Neandertal"],
-        rate=0.0,
-    )
-
-    print(f"Demography build")
-    return dem
-
-
-def simulate_vcf_bgzf(
-    dem, N_perpop, mu, rec, seed, l, model,
-    vcf_path, label_path
-):
-    # Set up the simulation parameters
-    samples = [msprime.SampleSet(N_perpop, population=p, ploidy=2) for p in ["YRI", "CEU", "Neandertal"]]
-    print(f"Samples → \n {samples}")
-
-    dem.sort_events()
-    #simulate
-    ts_anc = msprime.sim_ancestry(
-        samples=samples,
-        demography=dem,
-        sequence_length=l,
-        recombination_rate=rec,
-        model=model,
-        random_seed=seed,
-    )
-
-    #mutation
-    ts = msprime.sim_mutations(
-        ts_anc, rate=mu, model=msprime.JC69(), random_seed=seed)
     
-    #write bgzf vcf
-    
+def write_vcf(ts, vcf_path, label_path):
+    import numpy as np
     vcf_path = Path(vcf_path)
     vcf_path.parent.mkdir(parents=True, exist_ok=True)
- 
+
+    # ---------- Write bgzipped VCF ----------
     with open(vcf_path, "wb") as fout:
         proc = subprocess.Popen(["bgzip", "-c"], stdin=subprocess.PIPE, stdout=fout)
         with io.TextIOWrapper(proc.stdin, encoding="utf-8") as pipe:
@@ -91,16 +27,44 @@ def simulate_vcf_bgzf(
             raise RuntimeError("bgzip failed while compressing VCF")
         
     pysam.tabix_index(str(vcf_path), preset="vcf", force=True)
-        
-    # output labels
+
+
+    # ---------- Compute ancestry proportions ----------
+    pop_names = [p.metadata["name"] for p in ts.populations()]
+    n_pops = len(pop_names)
+
+    # 每个样本的 q 值： individuals × populations
+    Q = np.zeros((ts.num_individuals, n_pops))
+
+    # 遍历所有区间
+    for tree in ts.trees():
+        interval_len = tree.interval[1] - tree.interval[0]
+
+        for ind_id, ind in enumerate(ts.individuals()):
+            # diploid → 两个节点
+            nodes = ind.nodes
+            for node in nodes:
+                anc = tree.roots if tree.parent(node) == tskit.NULL else tree.parent(node)
+
+                # ancestry population = population of the MRCA
+                pop_id = tree.population(node)   # 树上 node 所属的 population
+                Q[ind_id, pop_id] += interval_len
+
+    # 归一化（除以全基因组总长度）
+    Q = Q / np.sum(Q, axis=1, keepdims=True)
+
+
+    # ---------- Write label file ----------
     with open(label_path, "w") as w:
-        w.write("sample\tpopulation\n")
+        # 写表头
+        header = ["sample", "population"] + [f"q_{name}" for name in pop_names]
+        w.write("\t".join(header) + "\n")
+
         for i, ind in enumerate(ts.individuals()):
-            pop_id = ts.node(ind.nodes[0]).population   # 整数 id
-            # 从 TreeSequence 里取这个种群的名字；如果没有名字就退回到 pop{id}
-            pop_name = ts.population(pop_id).metadata.get("name", f"pop{pop_id}")
-            w.write(f"tsk_{i}\t{pop_name}\n")
+            pop_id = ts.node(ind.nodes[0]).population
+            pop_name = ts.population(pop_id).metadata["name"]
 
+            row = [f"tsk_{i}", pop_name] + [f"{x:.5f}" for x in Q[i]]
+            w.write("\t".join(row) + "\n")
 
-    print('simulation done.')
-    
+    print("simulation done.")

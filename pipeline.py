@@ -18,9 +18,9 @@ from scripts.run_em import run_em_for_all_tests             # 你的函数，内
 
 
 def main():
-    # # 1) 运行模拟，生成 VCF + 标签
-    # run_simulate()
-    # print("[OK] Pipeline complete.")
+    # 1) 运行模拟，生成 VCF + 标签
+    run_simulate(model="admix")
+    print("[OK] Pipeline complete.")
 
     # # 2) 分层划分样本
     # stratified_split_samples_pd(
@@ -56,25 +56,25 @@ def main():
 
     # 6) 运行 EM，生成最终结果
     # 你当前工程默认结构（可按需修改）
-    tsv_dir        = "data/em"
-    hap_index_csv  = "data/align/ref_haps_index.csv"
-    ref_meta_csv   = "data/ref_samples.csv"
-    test_list_csv  = "data/test_samples.csv"
-    out_csv        = "data/em/em_results.csv"
+    # tsv_dir        = "data/em"
+    # hap_index_csv  = "data/align/ref_haps_index.csv"
+    # ref_meta_csv   = "data/ref_samples.csv"
+    # test_list_csv  = "data/test_samples.csv"
+    # out_csv        = "data/em/em_results.csv"
 
-    # 跑全部测试样本，逐样本写结果（追加）
-    run_em_for_all_tests(
-        tsv_dir=tsv_dir,
-        test_list_csv=test_list_csv,
-        hap_index_csv=hap_index_csv,
-        ref_meta_csv=ref_meta_csv,
-        out_csv=out_csv,
-        alpha=0.005,
-        max_iter=100,
-        tol=1e-5,
-        verbose=True
-    )
-    print("[PIPELINE] EM 全部完成 -> %s" % out_csv)
+    # # 跑全部测试样本，逐样本写结果（追加）
+    # run_em_for_all_tests(
+    #     tsv_dir=tsv_dir,
+    #     test_list_csv=test_list_csv,
+    #     hap_index_csv=hap_index_csv,
+    #     ref_meta_csv=ref_meta_csv,
+    #     out_csv=out_csv,
+    #     alpha=0.005,
+    #     max_iter=100,
+    #     tol=1e-5,
+    #     verbose=True
+    # )
+    # print("[PIPELINE] EM 全部完成 -> %s" % out_csv)
 
 if __name__ == "__main__":
     main()
