@@ -1,0 +1,5116 @@
+#include "sparse_em.h"
+#include "squarem.h"
+#include "em_algorithms.h"  // For safe_log and safe_exp
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <math.h>
+#include <ctype.h>
+
+// Debug likelihood globals
+int debug_likelihood_mode = 0;
+char *debug_parameter_file = NULL;
+
+// Likelihood ratio test variables
+int likelihood_ratio_test_mode = 0;
+char *test_parameter_file = NULL;
+char *test_genome_name = NULL;
+double original_log_likelihood = 0.0;
+char **debug_genome_names = NULL;
+int debug_n_genomes = 0;
+
+// Function prototypes
+void load_test_parameters_and_setup(sparse_em_data_t *sparse_em_data);
+void remove_test_genome_and_renormalize(sparse_em_data_t *sparse_em_data);
+void print_likelihood_ratio_and_exit(sparse_em_data_t *sparse_em_data);
+
+// Debug parameter loading function with validation
+void load_debug_parameters(sparse_em_data_t *sparse_em_data) {
+    if (!debug_parameter_file || !sparse_em_data) {
+        printf("ERROR: Debug parameter loading - invalid arguments\n");
+        return;
+    }
+    
+    FILE *fp = fopen(debug_parameter_file, "r");
+    if (!fp) { 
+        printf("ERROR: Cannot open debug parameter file: %s\n", debug_parameter_file); 
+        return; 
+    }
+    
+    
+    // DEBUG: Show actual genome order in data structure (original calculation order)
+    if (debug_genome_names && debug_n_genomes > 0) {
+        for (int i = 0; i < debug_n_genomes; i++) {
+        }
+    } else {
+    }
+    
+    // DEBUG: Show actual taxonomic group order in data structure (original calculation order)
+    if (sparse_em_data->alignment_data && sparse_em_data->alignment_data->taxonomic_groups) {
+        for (int i = 0; i < sparse_em_data->n_taxonomic_groups; i++) {
+        }
+    } else {
+    }
+    
+    char line[1024]; 
+    int found_section = 0; 
+    int genomes_loaded = 0; 
+    int taxonomic_loaded = 0;
+    int line_number = 0;
+    
+    // Initialize all parameters to zero (no hardcoded defaults)
+    if (sparse_em_data->taxonomic_proportions) {
+        for (int t = 0; t < sparse_em_data->n_taxonomic_groups; t++) {
+            sparse_em_data->taxonomic_proportions[t] = 0.0;
+        }
+    }
+    
+    while (fgets(line, sizeof(line), fp)) {
+        line_number++;
+        line[strcspn(line, "\n")] = 0;  // Remove newline
+        
+        // Skip empty lines and comments
+        if (strlen(line) == 0 || line[0] == '#') continue;
+        
+        // Find the data section header
+        if (strstr(line, "genome") && strstr(line, "proportion")) { 
+            found_section = 1; 
+            continue; 
+        }
+        
+        if (found_section) {
+            char name[256]; 
+            double prop, err, dmg;
+            
+            // Parse the data line
+            int parsed = sscanf(line, "%255s %lf %lf %lf", name, &prop, &err, &dmg);
+            if (parsed != 4) {
+                printf("WARNING: Skipping malformed line %d: %s (parsed %d/4 fields)\n", 
+                       line_number, line, parsed);
+                continue;
+            }
+            
+            // Validate parameter ranges
+            if (prop < 0.0 || prop > 1.0) {
+                printf("ERROR: Invalid proportion %.6f for %s at line %d\n", prop, name, line_number);
+                continue;
+            }
+            if (err < 0.0 || err > 1.0) {
+                printf("ERROR: Invalid error rate %.6f for %s at line %d\n", err, name, line_number);
+                continue;
+            }
+            if (dmg < 0.0 || dmg > 1.0) {
+                printf("ERROR: Invalid damage rate %.6f for %s at line %d\n", dmg, name, line_number);
+                continue;
+            }
+            
+            if (strchr(name, ':') != NULL) {
+                // Taxonomic group - find correct index by name matching
+                for (int i = 0; i < sparse_em_data->n_taxonomic_groups; i++) {
+                    if (sparse_em_data->alignment_data && sparse_em_data->alignment_data->taxonomic_groups) {
+                        printf("  Index %d: '%s'\n", i, sparse_em_data->alignment_data->taxonomic_groups[i].name ? 
+                               sparse_em_data->alignment_data->taxonomic_groups[i].name : "NULL");
+                    }
+                }
+                
+                int found_tax_idx = -1;
+                if (sparse_em_data->alignment_data && sparse_em_data->alignment_data->taxonomic_groups) {
+                    // Look up taxonomic group by name
+                    for (int i = 0; i < sparse_em_data->n_taxonomic_groups; i++) {
+                        if (sparse_em_data->alignment_data->taxonomic_groups[i].name) {
+                            if (strcmp(sparse_em_data->alignment_data->taxonomic_groups[i].name, name) == 0) {
+                                found_tax_idx = i;
+                                break;
+                            }
+                        }
+                    }
+                }
+                
+                if (found_tax_idx == -1) {
+                }
+                
+                if (found_tax_idx >= 0 && found_tax_idx < sparse_em_data->n_taxonomic_groups && sparse_em_data->taxonomic_proportions) {
+                    sparse_em_data->taxonomic_proportions[found_tax_idx] = prop;
+                    int unified_idx = sparse_em_data->n_genomes + found_tax_idx;
+                    if (sparse_em_data->error_rates && unified_idx < sparse_em_data->n_total_entities) {
+                        sparse_em_data->error_rates[unified_idx] = err;
+                        sparse_em_data->damage_rates[unified_idx] = dmg;
+                    }
+                    taxonomic_loaded++;
+                } else {
+                    printf("ERROR: Could not find taxonomic group index for %s\n", name);
+                    printf("ERROR: Available taxonomic groups in data structure:\n");
+                    for (int i = 0; i < sparse_em_data->n_taxonomic_groups; i++) {
+                        if (sparse_em_data->alignment_data && sparse_em_data->alignment_data->taxonomic_groups) {
+                            printf("  Index %d: %s\n", i, sparse_em_data->alignment_data->taxonomic_groups[i].name ? 
+                                   sparse_em_data->alignment_data->taxonomic_groups[i].name : "NULL");
+                        }
+                    }
+                    fclose(fp);
+                    exit(1);
+                }
+            } else {
+                // Genome - use dynamic lookup by name
+                int found_idx = -1;
+                if (debug_genome_names && debug_n_genomes > 0) {
+                    // Dynamic lookup using genome names
+                    for (int i = 0; i < debug_n_genomes; i++) {
+                        if (debug_genome_names[i] && strcmp(debug_genome_names[i], name) == 0) {
+                            found_idx = i;
+                            break;
+                        }
+                    }
+                } else {
+                    printf("WARNING: No genome names available, cannot match genome %s\n", name);
+                }
+                
+                if (found_idx >= 0 && found_idx < sparse_em_data->n_genomes) {
+                    sparse_em_data->proportions[found_idx] = prop; 
+                    sparse_em_data->error_rates[found_idx] = err; 
+                    sparse_em_data->damage_rates[found_idx] = dmg;
+                    genomes_loaded++;
+                } else {
+                    printf("ERROR: Could not find genome index for %s\n", name);
+                    printf("ERROR: Available genome names:\n");
+                    for (int i = 0; i < debug_n_genomes; i++) {
+                        printf("  Index %d: %s\n", i, debug_genome_names[i] ? debug_genome_names[i] : "NULL");
+                    }
+                    fclose(fp);
+                    exit(1);
+                }
+            }
+        }
+    }
+    
+    fclose(fp);
+    
+    // Comprehensive validation checks
+    
+    // CRITICAL CHECK 1: Verify ALL genomes from parameter file were found in data structure
+    if (genomes_loaded != sparse_em_data->n_genomes) {
+        printf("ERROR: Genome count mismatch! Expected %d genomes in data structure, but loaded %d from parameter file\n", 
+               sparse_em_data->n_genomes, genomes_loaded);
+        printf("ERROR: This indicates the parameter file was generated from a different dataset\n");
+        exit(1);
+    }
+    
+    // Handle missing taxonomic groups (filtered out due to low proportions)
+    if (sparse_em_data->n_taxonomic_groups > 0 && taxonomic_loaded < sparse_em_data->n_taxonomic_groups) {
+        
+        // Find which taxonomic groups are missing and initialize them
+        for (int t = 0; t < sparse_em_data->n_taxonomic_groups; t++) {
+            if (sparse_em_data->taxonomic_proportions[t] == 0.0) {  // Not loaded
+                
+                // Set minimal proportion (just above numerical precision)
+                sparse_em_data->taxonomic_proportions[t] = 1e-12;
+                
+                // Set reasonable default error and damage rates for missing groups
+                int unified_idx = sparse_em_data->n_genomes + t;
+                if (unified_idx < sparse_em_data->n_total_entities) {
+                    sparse_em_data->error_rates[unified_idx] = 0.01;   // 1% error rate
+                    sparse_em_data->damage_rates[unified_idx] = 0.01;  // 1% damage rate
+                }
+            }
+        }
+    }
+    
+    // CRITICAL CHECK 3: Verify no genome parameters are zero/uninitialized (except legitimately small proportions)
+    for (int i = 0; i < sparse_em_data->n_genomes; i++) {
+        if (sparse_em_data->proportions[i] < 0.0) {
+            printf("ERROR: Genome %d has negative proportion %.6f\n", i, sparse_em_data->proportions[i]);
+            exit(1);
+        }
+        if (sparse_em_data->error_rates[i] <= 0.0 || sparse_em_data->error_rates[i] >= 1.0) {
+            printf("ERROR: Genome %d has invalid error rate %.6f\n", i, sparse_em_data->error_rates[i]);
+            exit(1);
+        }
+        if (sparse_em_data->damage_rates[i] <= 0.0 || sparse_em_data->damage_rates[i] >= 1.0) {
+            printf("ERROR: Genome %d has invalid damage rate %.6f\n", i, sparse_em_data->damage_rates[i]);
+            exit(1);
+        }
+    }
+    
+    // CRITICAL CHECK 4: Verify taxonomic group parameters are valid
+    if (sparse_em_data->taxonomic_proportions) {
+        for (int t = 0; t < sparse_em_data->n_taxonomic_groups; t++) {
+            int unified_idx = sparse_em_data->n_genomes + t;
+            if (sparse_em_data->taxonomic_proportions[t] < 0.0) {
+                printf("ERROR: Taxonomic group %d has negative proportion %.6f\n", t, sparse_em_data->taxonomic_proportions[t]);
+                exit(1);
+            }
+            if (unified_idx < sparse_em_data->n_total_entities) {
+                if (sparse_em_data->error_rates[unified_idx] <= 0.0 || sparse_em_data->error_rates[unified_idx] >= 1.0) {
+                    printf("ERROR: Taxonomic group %d has invalid error rate %.6f\n", t, sparse_em_data->error_rates[unified_idx]);
+                    exit(1);
+                }
+                if (sparse_em_data->damage_rates[unified_idx] <= 0.0 || sparse_em_data->damage_rates[unified_idx] >= 1.0) {
+                    printf("ERROR: Taxonomic group %d has invalid damage rate %.6f\n", t, sparse_em_data->damage_rates[unified_idx]);
+                    exit(1);
+                }
+            }
+        }
+    }
+    
+    // CRITICAL CHECK 5: Validate proportion sums
+    double genome_prop_sum = 0.0;
+    for (int i = 0; i < sparse_em_data->n_genomes; i++) {
+        genome_prop_sum += sparse_em_data->proportions[i];
+    }
+    
+    double tax_prop_sum = 0.0;
+    if (sparse_em_data->taxonomic_proportions) {
+        for (int t = 0; t < sparse_em_data->n_taxonomic_groups; t++) {
+            tax_prop_sum += sparse_em_data->taxonomic_proportions[t];
+        }
+    }
+    
+    
+    if (fabs(genome_prop_sum + tax_prop_sum - 1.0) > 1e-5) {
+        printf("ERROR: Total proportions do not sum to 1.0 (sum = %.6f)\n", 
+               genome_prop_sum + tax_prop_sum);
+        printf("ERROR: This indicates parameter loading failed\n");
+        exit(1);
+    }
+    
+    
+    // DEBUG: Check data state (active reads/genomes)
+    int active_reads = 0, active_genomes = 0, active_taxonomic = 0;
+    if (sparse_em_data->active_reads) {
+        for (int i = 0; i < sparse_em_data->n_reads; i++) {
+            if (sparse_em_data->active_reads[i]) active_reads++;
+        }
+    } else {
+    }
+    
+    if (sparse_em_data->active_genomes) {
+        for (int i = 0; i < sparse_em_data->n_genomes; i++) {
+            if (sparse_em_data->active_genomes[i]) active_genomes++;
+        }
+    } else {
+    }
+}
+
+// Likelihood ratio test parameter loading function
+void load_test_parameters_and_setup(sparse_em_data_t *sparse_em_data) {
+    if (!test_parameter_file || !sparse_em_data) {
+        printf("ERROR: Likelihood ratio test parameter loading - invalid arguments\n");
+        return;
+    }
+    
+    FILE *fp = fopen(test_parameter_file, "r");
+    if (!fp) { 
+        printf("ERROR: Cannot open test parameter file: %s\n", test_parameter_file); 
+        return; 
+    }
+    
+    char line[1024]; 
+    int found_section = 0; 
+    int genomes_loaded = 0; 
+    int taxonomic_loaded = 0;
+    int line_number = 0;
+    double L_A = 0.0;  // Original log likelihood
+    
+    // Initialize all parameters to zero 
+    if (sparse_em_data->taxonomic_proportions) {
+        for (int t = 0; t < sparse_em_data->n_taxonomic_groups; t++) {
+            sparse_em_data->taxonomic_proportions[t] = 0.0;
+        }
+    }
+    
+    while (fgets(line, sizeof(line), fp)) {
+        line_number++;
+        line[strcspn(line, "\n")] = 0;  // Remove newline
+        
+        // Extract original log likelihood from header
+        if (strncmp(line, "LogLikelihood=", 14) == 0) {
+            L_A = atof(line + 14);
+            printf("Original log likelihood (L_A): %.6f\n", L_A);
+            original_log_likelihood = L_A;
+            continue;
+        }
+        
+        // Skip other header lines and comments
+        if (strlen(line) == 0 || line[0] == '#' || strchr(line, '=')) continue;
+        
+        // Find the data section header
+        if (strstr(line, "genome") && strstr(line, "proportion")) { 
+            found_section = 1; 
+            continue; 
+        }
+        
+        if (found_section) {
+            char name[256]; 
+            double prop, err, dmg;
+            char test_marker = '\0';
+            
+            // Parse the data line, checking for 'T' marker at end
+            int parsed = sscanf(line, "%255s %lf %lf %lf %c", name, &prop, &err, &dmg, &test_marker);
+            if (parsed < 4) {
+                printf("WARNING: Skipping malformed line %d: %s\n", line_number, line);
+                continue;
+            }
+            
+            // Check if this is the genome/taxonomic group to test
+            if (test_marker == 'T') {
+                printf("Found test genome/taxonomic group: %s (proportion=%.6f)\n", name, prop);
+                test_genome_name = strdup(name);
+                // Don't load this genome's parameters - we'll remove it
+                continue;
+            }
+            
+            // Validate parameter ranges for genomes we keep
+            if (prop < 0.0 || prop > 1.0) {
+                printf("ERROR: Invalid proportion %.6f for %s at line %d\n", prop, name, line_number);
+                continue;
+            }
+            
+            if (strchr(name, ':') != NULL) {
+                // Taxonomic group - load normally
+                int found_tax_idx = -1;
+                if (sparse_em_data->alignment_data && sparse_em_data->alignment_data->taxonomic_groups) {
+                    for (int i = 0; i < sparse_em_data->n_taxonomic_groups; i++) {
+                        if (sparse_em_data->alignment_data->taxonomic_groups[i].name) {
+                            if (strcmp(sparse_em_data->alignment_data->taxonomic_groups[i].name, name) == 0) {
+                                found_tax_idx = i;
+                                break;
+                            }
+                        }
+                    }
+                }
+                
+                if (found_tax_idx >= 0 && found_tax_idx < sparse_em_data->n_taxonomic_groups) {
+                    sparse_em_data->taxonomic_proportions[found_tax_idx] = prop;
+                    int unified_idx = sparse_em_data->n_genomes + found_tax_idx;
+                    if (sparse_em_data->error_rates && unified_idx < sparse_em_data->n_total_entities) {
+                        sparse_em_data->error_rates[unified_idx] = err;
+                        sparse_em_data->damage_rates[unified_idx] = dmg;
+                    }
+                    taxonomic_loaded++;
+                }
+            } else {
+                // Regular genome - load normally
+                int found_idx = -1;
+                if (debug_genome_names && debug_n_genomes > 0) {
+                    for (int i = 0; i < debug_n_genomes; i++) {
+                        if (debug_genome_names[i] && strcmp(debug_genome_names[i], name) == 0) {
+                            found_idx = i;
+                            break;
+                        }
+                    }
+                }
+                
+                if (found_idx >= 0 && found_idx < sparse_em_data->n_genomes) {
+                    sparse_em_data->proportions[found_idx] = prop; 
+                    sparse_em_data->error_rates[found_idx] = err; 
+                    sparse_em_data->damage_rates[found_idx] = dmg;
+                    genomes_loaded++;
+                }
+            }
+        }
+    }
+    
+    fclose(fp);
+    
+    if (!test_genome_name) {
+        printf("ERROR: No test genome found with 'T' marker in parameter file\n");
+        exit(1);
+    }
+    
+    printf("Loaded parameters for likelihood ratio test:\n");
+    printf("  Test genome: %s\n", test_genome_name);
+    printf("  Regular genomes loaded: %d\n", genomes_loaded);
+    printf("  Taxonomic groups loaded: %d\n", taxonomic_loaded);
+    
+    // Now remove the test genome and renormalize
+    remove_test_genome_and_renormalize(sparse_em_data);
+}
+
+// Function to remove test genome and renormalize proportions
+void remove_test_genome_and_renormalize(sparse_em_data_t *sparse_em_data) {
+    if (!test_genome_name) return;
+    
+    int test_removed = 0;
+    
+    // Check if it's a taxonomic group (contains ':')
+    if (strchr(test_genome_name, ':') != NULL) {
+        // Remove taxonomic group
+        if (sparse_em_data->alignment_data && sparse_em_data->alignment_data->taxonomic_groups) {
+            for (int t = 0; t < sparse_em_data->n_taxonomic_groups; t++) {
+                if (sparse_em_data->alignment_data->taxonomic_groups[t].name) {
+                    if (strcmp(sparse_em_data->alignment_data->taxonomic_groups[t].name, test_genome_name) == 0) {
+                        sparse_em_data->taxonomic_proportions[t] = 0.0;  // Set to zero
+                        printf("Removed taxonomic group %s from analysis\n", test_genome_name);
+                        test_removed = 1;
+                        break;
+                    }
+                }
+            }
+        }
+    } else {
+        // Remove regular genome using active_genomes mechanism
+        if (!sparse_em_data->active_genomes) {
+            // Initialize active arrays if not already done
+            sparse_em_data->active_genomes = malloc(sparse_em_data->alignment_data->n_genomes * sizeof(int));
+            sparse_em_data->active_reads = malloc(sparse_em_data->alignment_data->n_reads * sizeof(int));
+            
+            // Initially all are active
+            for (int j = 0; j < sparse_em_data->alignment_data->n_genomes; j++) {
+                sparse_em_data->active_genomes[j] = 1;
+            }
+            for (int i = 0; i < sparse_em_data->alignment_data->n_reads; i++) {
+                sparse_em_data->active_reads[i] = 1;
+            }
+            sparse_em_data->n_active_genomes = sparse_em_data->alignment_data->n_genomes;
+            sparse_em_data->n_active_reads = sparse_em_data->alignment_data->n_reads;
+        }
+        
+        // Find and remove the test genome
+        if (debug_genome_names && debug_n_genomes > 0) {
+            for (int j = 0; j < debug_n_genomes; j++) {
+                if (debug_genome_names[j] && strcmp(debug_genome_names[j], test_genome_name) == 0) {
+                    sparse_em_data->active_genomes[j] = 0;  // Mark as inactive
+                    sparse_em_data->proportions[j] = 0.0;   // Set proportion to zero
+                    sparse_em_data->n_active_genomes--;
+                    printf("Removed genome %s from analysis\n", test_genome_name);
+                    test_removed = 1;
+                    break;
+                }
+            }
+        }
+    }
+    
+    if (!test_removed) {
+        printf("ERROR: Could not find test genome %s to remove\n", test_genome_name);
+        exit(1);
+    }
+    
+    // Renormalize remaining proportions to sum to 1.0
+    double sum = 0.0;
+    
+    // Sum active genome proportions
+    for (int j = 0; j < sparse_em_data->n_genomes; j++) {
+        if (!sparse_em_data->active_genomes || sparse_em_data->active_genomes[j]) {
+            sum += sparse_em_data->proportions[j];
+        }
+    }
+    
+    // Sum taxonomic proportions (excluding the removed one)
+    if (sparse_em_data->taxonomic_proportions) {
+        for (int t = 0; t < sparse_em_data->n_taxonomic_groups; t++) {
+            sum += sparse_em_data->taxonomic_proportions[t];
+        }
+    }
+    
+    if (sum > 0.0) {
+        // Renormalize genome proportions
+        for (int j = 0; j < sparse_em_data->n_genomes; j++) {
+            if (!sparse_em_data->active_genomes || sparse_em_data->active_genomes[j]) {
+                sparse_em_data->proportions[j] /= sum;
+            }
+        }
+        
+        // Renormalize taxonomic proportions
+        if (sparse_em_data->taxonomic_proportions) {
+            for (int t = 0; t < sparse_em_data->n_taxonomic_groups; t++) {
+                if (sparse_em_data->taxonomic_proportions[t] > 0.0) {
+                    sparse_em_data->taxonomic_proportions[t] /= sum;
+                }
+            }
+        }
+        
+        printf("Renormalized remaining proportions (total was %.6f)\n", sum);
+    } else {
+        printf("ERROR: No remaining genomes after removing test genome\n");
+        exit(1);
+    }
+}
+
+// Function to print likelihood ratio test results and exit
+void print_likelihood_ratio_and_exit(sparse_em_data_t *sparse_em_data) {
+    if (likelihood_ratio_test_mode) {
+        double L_0 = sparse_em_data->log_likelihood;
+        double likelihood_ratio = original_log_likelihood - L_0;
+        printf("\n=== Likelihood Ratio Test Results ===\n");
+        printf("Test genome/taxonomic group: %s\n", test_genome_name ? test_genome_name : "Unknown");
+        printf("Log likelihood under alternative hypothesis (L_A): %.6f\n", original_log_likelihood);
+        printf("Log likelihood under null hypothesis (L_0): %.6f\n", L_0);
+        printf("Log likelihood ratio: L_A - L_0 = %.6f - %.6f = %.6f\n", 
+               original_log_likelihood, L_0, likelihood_ratio);
+        exit(0);
+    }
+}
+
+// Forward declarations
+void sparse_initialize_proportions_data_driven(sparse_em_data_t *sparse_em_data);
+int sparse_check_convergence(sparse_em_data_t *sparse_em_data, double tolerance);
+int sparse_check_convergence_with_rate(sparse_em_data_t *sparse_em_data, double tolerance);
+int sparse_check_convergence_damage_model(sparse_em_data_t *sparse_em_data, double tolerance);
+void sparse_normalize_proportions_active(double *proportions, int n_genomes, int *active_genomes);
+
+// Allocate sparse EM data structure
+sparse_em_data_t* sparse_em_data_alloc(const sparse_alignment_t *alignment_data) {
+    sparse_em_data_t *sparse_em_data = malloc(sizeof(sparse_em_data_t));
+    if (!sparse_em_data) return NULL;
+    
+    sparse_em_data->alignment_data = (sparse_alignment_t*)alignment_data;
+    sparse_em_data->n_reads = alignment_data->n_reads;
+    sparse_em_data->n_genomes = alignment_data->n_genomes;
+    
+    // Calculate total entries needed: genome alignments + taxonomic alignments
+    int total_entries = alignment_data->nnz;
+    if (alignment_data->has_taxonomic_groups && alignment_data->read_taxonomic_data) {
+        // Count taxonomic entries
+        for (int i = 0; i < alignment_data->n_reads; i++) {
+            if (alignment_data->read_taxonomic_data[i].n_taxa > 0) {
+                total_entries += alignment_data->read_taxonomic_data[i].n_taxa;
+            }
+        }
+        // DEBUG printf arguments removed
+    }
+    
+    // Store total entries for later use (reuse n_taxonomic_entries field to store total entries)
+    sparse_em_data->n_taxonomic_entries = total_entries;
+    
+    // Allocate arrays (expanded to include taxonomic entries)
+    sparse_em_data->proportions = malloc(alignment_data->n_genomes * sizeof(double));
+    sparse_em_data->prev_proportions = malloc(alignment_data->n_genomes * sizeof(double));
+    sparse_em_data->Q_sparse = malloc(total_entries * sizeof(double));
+    sparse_em_data->W_sparse = malloc(total_entries * sizeof(double));
+    
+    // Initialize per-genome rate arrays to NULL (allocated when needed)
+    sparse_em_data->error_rates = NULL;
+    sparse_em_data->damage_rates = NULL;
+    sparse_em_data->prev_error_rates = NULL;
+    sparse_em_data->prev_damage_rates = NULL;
+    
+    if (!sparse_em_data->proportions || !sparse_em_data->prev_proportions ||
+        !sparse_em_data->Q_sparse || !sparse_em_data->W_sparse) {
+        sparse_em_data_free(sparse_em_data);
+        return NULL;
+    }
+    
+    // Initialize proportions using data-driven approach (will be done later)
+    // For now, set to uniform as a fallback
+    for (int i = 0; i < alignment_data->n_genomes; i++) {
+        sparse_em_data->proportions[i] = 1.0 / alignment_data->n_genomes;
+    }
+    
+    sparse_em_data->error_rate = 0.005;  // Default error rate
+    sparse_em_data->damage_rate = 0.05;  // Default damage rate
+    sparse_em_data->log_likelihood = -INFINITY;
+    sparse_em_data->prev_log_likelihood = -INFINITY;
+    sparse_em_data->iteration = 0;
+    
+    // Initialize extended fields for taxonomic groups
+    sparse_em_data->log_half = safe_log(0.5);  // Pre-calculate constant
+    sparse_em_data->log_p_mix = 0.0;  // Will be calculated when needed
+    sparse_em_data->log_p_mix_per_genome = NULL;  // Allocated when needed for per-genome models
+    
+    // Allocate taxonomic group storage if needed
+    if (alignment_data->has_taxonomic_groups && alignment_data->n_taxonomic_groups > 0) {
+        int n_taxa = alignment_data->n_taxonomic_groups;
+        // n_reads variable removed (unused)
+        
+        // Allocate sparse taxonomic storage for extended EM
+        // Note: n_taxonomic_entries will be set when taxonomic data is processed
+        sparse_em_data->n_taxonomic_entries = 0;  // Will be calculated during data reading
+        sparse_em_data->Q_taxonomic_sparse = NULL;  // Will be allocated after n_taxonomic_entries is known
+        sparse_em_data->W_taxonomic_sparse = NULL;  // Will be allocated after n_taxonomic_entries is known
+        
+        printf("Sparse taxonomic EM storage will be allocated after counting entries...\n");
+        
+        // Allocate proportions for taxonomic groups
+        sparse_em_data->taxonomic_proportions = malloc(n_taxa * sizeof(double));
+        sparse_em_data->prev_taxonomic_proportions = malloc(n_taxa * sizeof(double));
+        
+        if (!sparse_em_data->taxonomic_proportions || !sparse_em_data->prev_taxonomic_proportions) {
+            sparse_em_data_free(sparse_em_data);
+            return NULL;
+        }
+        
+        // Initialize all proportions jointly (genomes + taxonomic groups sum to 1.0)
+        double uniform_prop = 1.0 / (alignment_data->n_genomes + n_taxa);
+        
+        // Initialize taxonomic proportions to uniform
+        for (int t = 0; t < n_taxa; t++) {
+            sparse_em_data->taxonomic_proportions[t] = uniform_prop;
+        }
+        
+        // Initialize genome proportions to uniform (same as taxonomic groups)
+        for (int j = 0; j < alignment_data->n_genomes; j++) {
+            sparse_em_data->proportions[j] = uniform_prop;
+        }
+        
+        
+        // Initialize per-taxonomic group rates to NULL (allocated when needed for *full extended models)
+        // Extended taxonomic rate arrays removed
+        
+        // Store number of taxonomic groups for easy access
+        sparse_em_data->n_taxonomic_groups = n_taxa;
+        
+        // Initialize unified arrays for new format (genomes + taxonomic groups)
+        sparse_em_data->n_total_entities = alignment_data->n_genomes + n_taxa;
+        sparse_em_data->unified_proportions = malloc(sparse_em_data->n_total_entities * sizeof(double));
+        sparse_em_data->unified_error_rates = NULL;  // Allocated when needed for CEDfull
+        sparse_em_data->unified_damage_rates = NULL; // Allocated when needed for CEDfull
+        sparse_em_data->prev_unified_proportions = malloc(sparse_em_data->n_total_entities * sizeof(double));
+        sparse_em_data->prev_unified_error_rates = NULL;
+        sparse_em_data->prev_unified_damage_rates = NULL;
+        sparse_em_data->unified_active_entities = malloc(sparse_em_data->n_total_entities * sizeof(int));
+        sparse_em_data->n_active_entities = sparse_em_data->n_total_entities;
+        
+        if (!sparse_em_data->unified_proportions || !sparse_em_data->prev_unified_proportions || 
+            !sparse_em_data->unified_active_entities) {
+            sparse_em_data_free(sparse_em_data);
+            return NULL;
+        }
+        
+        // Initialize unified proportions (first n_genomes for genomes, rest for taxonomic groups)
+        for (int i = 0; i < sparse_em_data->n_total_entities; i++) {
+            sparse_em_data->unified_proportions[i] = uniform_prop;
+            sparse_em_data->unified_active_entities[i] = 1;  // All active initially
+        }
+        
+        // Copy format flag from alignment data
+        sparse_em_data->use_float_mb_format = alignment_data->use_float_mb_format;
+        
+    } else {
+        // No taxonomic groups
+        sparse_em_data->Q_taxonomic_sparse = NULL;
+        sparse_em_data->W_taxonomic_sparse = NULL;
+        sparse_em_data->taxonomic_proportions = NULL;
+        sparse_em_data->prev_taxonomic_proportions = NULL;
+        // Extended taxonomic rate arrays removed
+        sparse_em_data->n_taxonomic_groups = 0;
+        
+        // Initialize unified arrays (just genomes, no taxonomic groups)
+        sparse_em_data->n_total_entities = alignment_data->n_genomes;
+        sparse_em_data->unified_proportions = malloc(sparse_em_data->n_total_entities * sizeof(double));
+        sparse_em_data->unified_error_rates = NULL;
+        sparse_em_data->unified_damage_rates = NULL;
+        sparse_em_data->prev_unified_proportions = malloc(sparse_em_data->n_total_entities * sizeof(double));
+        sparse_em_data->prev_unified_error_rates = NULL;
+        sparse_em_data->prev_unified_damage_rates = NULL;
+        sparse_em_data->unified_active_entities = malloc(sparse_em_data->n_total_entities * sizeof(int));
+        sparse_em_data->n_active_entities = sparse_em_data->n_total_entities;
+        sparse_em_data->use_float_mb_format = 0;  // No taxonomic groups, so no float format
+        
+        if (!sparse_em_data->unified_proportions || !sparse_em_data->prev_unified_proportions || 
+            !sparse_em_data->unified_active_entities) {
+            sparse_em_data_free(sparse_em_data);
+            return NULL;
+        }
+        
+        // Initialize unified proportions (only genomes)
+        for (int i = 0; i < sparse_em_data->n_total_entities; i++) {
+            sparse_em_data->unified_proportions[i] = 1.0 / sparse_em_data->n_total_entities;
+            sparse_em_data->unified_active_entities[i] = 1;  // All active initially
+        }
+    }
+    
+    // Initialize pruning fields to NULL (will be allocated when needed)
+    sparse_em_data->active_genomes = NULL;
+    sparse_em_data->active_reads = NULL;
+    sparse_em_data->n_active_genomes = 0;
+    sparse_em_data->n_active_reads = 0;
+    sparse_em_data->read_names = NULL;
+    sparse_em_data->removed_reads_file = NULL;
+    sparse_em_data->min_proportion = 0.0;
+
+    // Initialize constraint fields (will be set later when config is available)
+    sparse_em_data->constraints = NULL;
+    sparse_em_data->n_constraints = 0;
+
+    // Initialize fixed parameter mask fields to NULL
+    sparse_em_data->error_rate_fixed_mask = NULL;
+    sparse_em_data->error_rate_fixed_values = NULL;
+
+    // Initialize joint damage rate fields
+    sparse_em_data->shared_damage_rate = 0.0;
+    sparse_em_data->joint_damage_rate = 0;
+
+    return sparse_em_data;
+}
+
+// Free sparse EM data structure
+void sparse_em_data_free(sparse_em_data_t *sparse_em_data) {
+    if (!sparse_em_data) return;
+    
+    free(sparse_em_data->proportions);
+    free(sparse_em_data->prev_proportions);
+    free(sparse_em_data->Q_sparse);
+    free(sparse_em_data->W_sparse);
+    free(sparse_em_data->error_rates);
+    free(sparse_em_data->damage_rates);
+    free(sparse_em_data->prev_error_rates);
+    free(sparse_em_data->prev_damage_rates);
+
+    // Free fixed parameter masks
+    free(sparse_em_data->error_rate_fixed_mask);
+    free(sparse_em_data->error_rate_fixed_values);
+
+    // Free taxonomic group storage
+    // Free sparse taxonomic arrays (1D arrays, not 2D like the old dense format)
+    free(sparse_em_data->Q_taxonomic_sparse);
+    free(sparse_em_data->W_taxonomic_sparse);
+    
+    free(sparse_em_data->taxonomic_proportions);
+    free(sparse_em_data->prev_taxonomic_proportions);
+    // Extended taxonomic rate array deallocations removed
+    free(sparse_em_data->log_p_mix_per_genome);
+    
+    // Free unified arrays
+    free(sparse_em_data->unified_proportions);
+    free(sparse_em_data->unified_error_rates);
+    free(sparse_em_data->unified_damage_rates);
+    free(sparse_em_data->prev_unified_proportions);
+    free(sparse_em_data->prev_unified_error_rates);
+    free(sparse_em_data->prev_unified_damage_rates);
+    free(sparse_em_data->unified_active_entities);
+    
+    free(sparse_em_data);
+}
+
+// Sparse Q matrix calculation for Method A
+void sparse_calcQ_method_A(sparse_em_data_t *sparse_em_data) {
+    const sparse_alignment_t *sparse = sparse_em_data->alignment_data;
+    double error_rate = sparse_em_data->error_rate;
+    
+    // Precompute logarithms for efficiency
+    double log_error = safe_log(error_rate);
+    double log_1_minus_error = safe_log(1.0 - error_rate);
+    
+    for (int idx = 0; idx < sparse->nnz; idx++) {
+        double n_ij = sparse->n_values[idx];
+        double d_ij = sparse->d_values[idx];
+        
+        // Calculate Q in log space to avoid expensive pow() calls
+        double log_Q = d_ij * log_error + (n_ij - d_ij) * log_1_minus_error;
+        sparse_em_data->Q_sparse[idx] = safe_exp(log_Q);
+    }
+}
+
+// Sparse Q matrix calculation for Method AE
+void sparse_calcQ_method_AE(sparse_em_data_t *sparse_em_data) {
+    // Same as Method A - error rate will be estimated in M-step
+    sparse_calcQ_method_A(sparse_em_data);
+}
+
+// Sparse Q matrix calculation for Method B
+void sparse_calcQ_method_B(sparse_em_data_t *sparse_em_data) {
+    const sparse_alignment_t *sparse = sparse_em_data->alignment_data;
+    double error_rate = sparse_em_data->error_rate;
+    
+    // Precompute logarithms for efficiency
+    double error_div3 = error_rate / 3.0;
+    if (error_div3 < 1e-100) error_div3 = 1e-100;
+    double log_error_div3 = safe_log(error_div3);
+    double log_1_minus_error = safe_log(1.0 - error_rate);
+    
+    for (int idx = 0; idx < sparse->nnz; idx++) {
+        double n_ij = sparse->n_values[idx];
+        double d_ij = sparse->d_values[idx];
+        
+        // Calculate Q in log space to avoid expensive pow() calls
+        double log_Q = d_ij * log_error_div3 + (n_ij - d_ij) * log_1_minus_error;
+        sparse_em_data->Q_sparse[idx] = safe_exp(log_Q);
+    }
+}
+
+// Sparse Q matrix calculation for Method BE
+void sparse_calcQ_method_BE(sparse_em_data_t *sparse_em_data) {
+    // Same as Method B - error rate will be estimated in M-step
+    sparse_calcQ_method_B(sparse_em_data);
+}
+
+// Sparse Q matrix calculation for Method BEfull (per-genome error rates)
+void sparse_calcQ_method_BEfull(sparse_em_data_t *sparse_em_data) {
+    const sparse_alignment_t *sparse = sparse_em_data->alignment_data;
+    
+    // Make sure per-genome error rates are allocated
+    if (!sparse_em_data->error_rates) {
+        fprintf(stderr, "Error: Per-genome error rates not allocated for BEfull\n");
+        return;
+    }
+    
+    // For each non-zero entry, calculate Q using genome-specific error rate
+    for (int idx = 0; idx < sparse->nnz; idx++) {
+        // Find which genome this entry corresponds to
+        int genome_idx = sparse->col_indices[idx];
+        
+        // Skip inactive genomes - set Q to 0 and continue
+        if (sparse_em_data->active_genomes && !sparse_em_data->active_genomes[genome_idx]) {
+            sparse_em_data->Q_sparse[idx] = 0.0;
+            continue;
+        }
+        
+        double n_ij = sparse->n_values[idx];
+        double d_ij = sparse->d_values[idx];
+        double error_rate_j = sparse_em_data->error_rates[genome_idx];
+        
+        // Calculate Q in log space for efficiency
+        double error_div3 = error_rate_j / 3.0;
+        if (error_div3 < 1e-100) error_div3 = 1e-100;
+        double log_error_div3 = safe_log(error_div3);
+        double log_1_minus_error = safe_log(1.0 - error_rate_j);
+        
+        double log_Q = d_ij * log_error_div3 + (n_ij - d_ij) * log_1_minus_error;
+        sparse_em_data->Q_sparse[idx] = safe_exp(log_Q);
+    }
+}
+
+// Sparse Q matrix calculation for Method C (damage model with fixed rates)
+void sparse_calcQ_method_C(sparse_em_data_t *sparse_em_data) {
+    const sparse_alignment_t *sparse = sparse_em_data->alignment_data;
+    double error_rate = sparse_em_data->error_rate;
+    double damage_rate = sparse_em_data->damage_rate;
+    
+    
+    // Check if damage arrays are allocated
+    if (!sparse->nd_values || !sparse->md_values || !sparse->mb_values) {
+        fprintf(stderr, "Error: Damage arrays not allocated for Method C\n");
+        return;
+    }
+    
+    // Precompute logarithms for efficiency (avoid repeated log calculations)
+    double log_damage = safe_log(damage_rate);
+    double log_1_minus_damage = safe_log(1.0 - damage_rate);
+    double error_div3 = error_rate / 3.0;
+    if (error_div3 < 1e-100) error_div3 = 1e-100;
+    double log_error_div3 = safe_log(error_div3);
+    double log_1_minus_error = safe_log(1.0 - error_rate);
+    
+    for (int idx = 0; idx < sparse->nnz; idx++) {
+        double n_ij = sparse->n_values[idx];
+        double nd_ij = sparse->nd_values[idx];
+        double md_ij = sparse->md_values[idx];
+        double mb_ij = sparse->mb_values[idx];
+        
+        // Calculate Q in log space to avoid expensive pow() calls
+        // log(Q) = md_ij * log(damage_rate) + (nd_ij-md_ij) * log(1-damage_rate) + 
+        //          mb_ij * log(error_rate/3) + (n_ij-md_ij-mb_ij) * log(1-error_rate)
+        double log_Q = md_ij * log_damage + 
+                      (nd_ij - md_ij) * log_1_minus_damage +
+                      mb_ij * log_error_div3 + 
+                      (n_ij - md_ij - mb_ij) * log_1_minus_error;
+        
+        sparse_em_data->Q_sparse[idx] = safe_exp(log_Q);
+    }
+}
+
+// Sparse Q matrix calculation for Method CE (damage model with estimated background rate)
+void sparse_calcQ_method_CE(sparse_em_data_t *sparse_em_data) {
+    // Same as Method C - background error rate will be estimated in M-step
+    sparse_calcQ_method_C(sparse_em_data);
+}
+
+// Sparse Q matrix calculation for Method CED (damage model with estimated rates)
+void sparse_calcQ_method_CED(sparse_em_data_t *sparse_em_data) {
+    // Same as Method C - both rates will be estimated in M-step
+    sparse_calcQ_method_C(sparse_em_data);
+}
+
+// Sparse Q matrix calculation for Method CEfull (per-genome error rates, fixed damage rate)
+// Q_ij = (1-ed)^(nd_ij-md_ij) * ed^md_ij * (1-ε_j)^(n_ij-md_ij-mb_ij) * (ε_j/3)^mb_ij
+void sparse_calcQ_method_CEfull(sparse_em_data_t *sparse_em_data) {
+    const sparse_alignment_t *sparse = sparse_em_data->alignment_data;
+    double damage_rate = sparse_em_data->damage_rate;
+    
+    // Check if damage arrays and per-genome error rates are allocated
+    if (!sparse->nd_values || !sparse->md_values || !sparse->mb_values) {
+        fprintf(stderr, "Error: Damage arrays not allocated for Method CEfull\n");
+        return;
+    }
+    
+    if (!sparse_em_data->error_rates) {
+        fprintf(stderr, "Error: Per-genome error rates not allocated for CEfull\n");
+        return;
+    }
+    
+    // Precompute damage rate logarithms (same for all genomes)
+    double log_damage = safe_log(damage_rate);
+    double log_1_minus_damage = safe_log(1.0 - damage_rate);
+    
+    for (int idx = 0; idx < sparse->nnz; idx++) {
+        int genome_idx = sparse->col_indices[idx];
+        
+        // Skip inactive genomes - set Q to 0 and continue
+        if (sparse_em_data->active_genomes && !sparse_em_data->active_genomes[genome_idx]) {
+            sparse_em_data->Q_sparse[idx] = 0.0;
+            continue;
+        }
+        
+        double n_ij = sparse->n_values[idx];
+        double nd_ij = sparse->nd_values[idx];
+        double md_ij = sparse->md_values[idx];
+        double mb_ij = sparse->mb_values[idx];
+        double error_rate_j = sparse_em_data->error_rates[genome_idx];
+        
+        double error_div3 = error_rate_j / 3.0;
+        if (error_div3 < 1e-100) error_div3 = 1e-100;
+        double log_error_div3 = safe_log(error_div3);
+        double log_1_minus_error = safe_log(1.0 - error_rate_j);
+        
+        // Calculate Q in log space
+        double log_Q = md_ij * log_damage + 
+                      (nd_ij - md_ij) * log_1_minus_damage +
+                      mb_ij * log_error_div3 +
+                      (n_ij - md_ij - mb_ij) * log_1_minus_error;
+        
+        sparse_em_data->Q_sparse[idx] = safe_exp(log_Q);
+    }
+}
+
+// Sparse Q matrix calculation for Method CEDfull (per-genome error and damage rates)
+// Q_ij = (1-ed_j)^(nd_ij-md_ij) * ed_j^md_ij * (1-ε_j)^(n_ij-md_ij-mb_ij) * (ε_j/3)^mb_ij
+void sparse_calcQ_method_CEDfull(sparse_em_data_t *sparse_em_data) {
+    const sparse_alignment_t *sparse = sparse_em_data->alignment_data;
+    
+    // Check if damage arrays and per-genome rates are allocated
+    if (!sparse->nd_values || !sparse->md_values || !sparse->mb_values) {
+        fprintf(stderr, "Error: Damage arrays not allocated for Method CEDfull\n");
+        return;
+    }
+    
+    if (!sparse_em_data->error_rates || !sparse_em_data->damage_rates) {
+        fprintf(stderr, "Error: Per-genome rates not allocated for CEDfull\n");
+        return;
+    }
+    
+    // DEBUG printf arguments removed
+    
+    for (int idx = 0; idx < sparse->nnz; idx++) {
+        int genome_idx = sparse->col_indices[idx];
+        
+        // Skip inactive genomes - set Q to 0 and continue
+        if (sparse_em_data->active_genomes && !sparse_em_data->active_genomes[genome_idx]) {
+            sparse_em_data->Q_sparse[idx] = 0.0;
+            continue;
+        }
+        
+        double n_ij = sparse->n_values[idx];
+        double nd_ij = sparse->nd_values[idx];
+        double md_ij = sparse->md_values[idx];
+        double mb_ij = sparse->mb_values[idx];
+        double error_rate_j = sparse_em_data->error_rates[genome_idx];
+        double damage_rate_j = sparse_em_data->damage_rates[genome_idx];
+        
+        double error_div3 = error_rate_j / 3.0;
+        if (error_div3 < 1e-100) error_div3 = 1e-100;
+        
+        // Calculate Q in log space (per-genome rates)
+        double log_damage = safe_log(damage_rate_j);
+        double log_1_minus_damage = safe_log(1.0 - damage_rate_j);
+        double log_error_div3 = safe_log(error_div3);
+        double log_1_minus_error = safe_log(1.0 - error_rate_j);
+        
+        double log_Q = md_ij * log_damage + 
+                      (nd_ij - md_ij) * log_1_minus_damage +
+                      mb_ij * log_error_div3 +
+                      (n_ij - md_ij - mb_ij) * log_1_minus_error;
+        
+        sparse_em_data->Q_sparse[idx] = safe_exp(log_Q);
+    }
+}
+
+// Simple CEDfull Q calculation with taxonomic groups using existing CSR structure
+void sparse_calcQ_method_CEDfull_simple(sparse_em_data_t *sparse_em_data) {
+    const sparse_alignment_t *sparse = sparse_em_data->alignment_data;
+    
+    
+    // Check if damage arrays and per-genome rates are allocated
+    if (!sparse->nd_values || !sparse->md_values || !sparse->mb_values) {
+        fprintf(stderr, "Error: Damage arrays not allocated for Method CEDfull\n");
+        return;
+    }
+    
+    if (!sparse_em_data->error_rates || !sparse_em_data->damage_rates) {
+        fprintf(stderr, "Error: Extended error/damage rates not allocated for CEDfull\n");
+        return;
+    }
+    
+    // Process genomes (same as original function)
+    for (int idx = 0; idx < sparse->nnz; idx++) {
+        int genome_idx = sparse->col_indices[idx];
+        
+        // Skip inactive genomes - set Q to 0 and continue
+        if (sparse_em_data->active_genomes && !sparse_em_data->active_genomes[genome_idx]) {
+            sparse_em_data->Q_sparse[idx] = 0.0;
+            continue;
+        }
+        
+        double n_ij = sparse->n_values[idx];
+        double nd_ij = sparse->nd_values[idx];
+        double md_ij = sparse->md_values[idx];
+        double mb_ij = sparse->mb_values[idx];
+        double error_rate_j = sparse_em_data->error_rates[genome_idx];
+        double damage_rate_j = sparse_em_data->damage_rates[genome_idx];
+        
+        
+        double error_div3 = error_rate_j / 3.0;
+        if (error_div3 < 1e-100) error_div3 = 1e-100;
+        
+        // Calculate Q in log space (per-genome rates)
+        double log_damage = safe_log(damage_rate_j);
+        double log_1_minus_damage = safe_log(1.0 - damage_rate_j);
+        double log_error_div3 = safe_log(error_div3);
+        double log_1_minus_error = safe_log(1.0 - error_rate_j);
+        
+        double log_Q = md_ij * log_damage + 
+                      (nd_ij - md_ij) * log_1_minus_damage +
+                      mb_ij * log_error_div3 +
+                      (n_ij - md_ij - mb_ij) * log_1_minus_error;
+        
+        sparse_em_data->Q_sparse[idx] = safe_exp(log_Q);
+    }
+    
+    // Process taxonomic groups using existing CSR structure (copied from extended models)
+    if (sparse_em_data->n_taxonomic_groups > 0 && sparse_em_data->taxonomic_row_ptr && sparse_em_data->taxonomic_col_indices) {
+        for (int read_idx = 0; read_idx < sparse->n_reads; read_idx++) {
+            int tax_start = sparse_em_data->taxonomic_row_ptr[read_idx];
+            int tax_end = sparse_em_data->taxonomic_row_ptr[read_idx + 1];
+            
+            // Get n_i from genome data (same for all alignments in this read)
+            int genome_start = sparse->row_ptr[read_idx];
+            int genome_end = sparse->row_ptr[read_idx + 1];
+            if (genome_start >= genome_end) {
+                fprintf(stderr, "Error: Read %d has no genome alignments - cannot determine n_i for taxonomic groups\n", read_idx);
+                exit(1);
+            }
+            double n_i = (double)sparse->n_values[genome_start];
+            
+            for (int tax_idx = tax_start; tax_idx < tax_end; tax_idx++) {
+                int tax_group = sparse_em_data->taxonomic_col_indices[tax_idx];
+                int unified_idx = sparse_em_data->n_genomes + tax_group;
+                
+                // Skip inactive taxonomic groups
+                if (sparse_em_data->unified_active_entities && !sparse_em_data->unified_active_entities[unified_idx]) {
+                    sparse_em_data->Q_taxonomic_sparse[tax_idx] = 0.0;
+                    continue;
+                }
+                
+                // Get taxonomic data for this read/group using CSR index
+                const read_taxonomic_data_t *tax_data = &sparse->read_taxonomic_data[read_idx];
+                int t = tax_idx - tax_start;  // Position within this read's taxonomic data
+                
+                if (t < 0 || t >= tax_data->n_taxa) continue;
+                
+                // Get taxonomic damage data (switch between int/float)
+                double nd_it = (double)tax_data->nd_values[t];
+                double md_it = (double)tax_data->md_values[t];
+                double mb_it;
+                
+                if (sparse_em_data->use_float_mb_format) {
+                    mb_it = (double)tax_data->mb_values_float[t];  // Float format
+                } else {
+                    mb_it = (double)tax_data->mb_values[t];        // Integer format
+                }
+                
+                double error_rate_t = sparse_em_data->error_rates[unified_idx];
+                double damage_rate_t = sparse_em_data->damage_rates[unified_idx];
+                
+                
+                double error_div3 = error_rate_t / 3.0;
+                if (error_div3 < 1e-100) error_div3 = 1e-100;
+                
+                // Calculate Q in log space (same formula as genomes)
+                double log_damage = safe_log(damage_rate_t);
+                double log_1_minus_damage = safe_log(1.0 - damage_rate_t);
+                double log_error_div3 = safe_log(error_div3);
+                double log_1_minus_error = safe_log(1.0 - error_rate_t);
+                
+                double log_Q = md_it * log_damage + 
+                              (nd_it - md_it) * log_1_minus_damage +
+                              mb_it * log_error_div3 +
+                              (n_i - md_it - mb_it) * log_1_minus_error;
+                
+                sparse_em_data->Q_taxonomic_sparse[tax_idx] = safe_exp(log_Q);
+            }
+        }
+    }
+}
+
+// New unified CEDfull Q calculation function that handles genomes + taxonomic groups
+void sparse_calcQ_method_CEDfull_unified(sparse_em_data_t *sparse_em_data) {
+    const sparse_alignment_t *sparse = sparse_em_data->alignment_data;
+    
+    // Check if unified arrays are allocated for CEDfull
+    if (!sparse_em_data->unified_error_rates || !sparse_em_data->unified_damage_rates) {
+        fprintf(stderr, "Error: Unified rates not allocated for CEDfull with taxonomic groups\n");
+        return;
+    }
+    
+    // DEBUG printf arguments removed
+    
+    // DEBUG: Track Q calculation calls
+    static int q_calc_call = 0;
+    q_calc_call++;
+    int show_debug = (q_calc_call <= 3 || q_calc_call % 50 == 0);
+
+    // Step 1: Calculate Q values for genome alignments (standard genome processing)
+    for (int idx = 0; idx < sparse->nnz; idx++) {
+        int genome_idx = sparse->col_indices[idx];
+
+        // Skip inactive genomes
+        if (sparse_em_data->unified_active_entities && !sparse_em_data->unified_active_entities[genome_idx]) {
+            sparse_em_data->Q_sparse[idx] = 0.0;
+            continue;
+        }
+
+        double n_ij = sparse->n_values[idx];
+        double nd_ij = sparse->nd_values[idx];
+        double md_ij = sparse->md_values[idx];
+        double mb_ij = sparse->mb_values[idx];
+        double error_rate_j = sparse_em_data->unified_error_rates[genome_idx];
+        double damage_rate_j = sparse_em_data->unified_damage_rates[genome_idx];
+
+        // DEBUG: Track rates used for problem genomes
+        if (show_debug && (genome_idx == 5972 || genome_idx == 7361 || genome_idx == 7394)) {
+            fprintf(stderr, "[Q-CALC call %d] Genome %d: using error_rate=%.16f, damage_rate=%.16f (from unified arrays at [%d])\n",
+                    q_calc_call, genome_idx, error_rate_j, damage_rate_j, genome_idx);
+            fprintf(stderr, "  -> Alignment data: n_ij=%.1f, nd_ij=%.1f, md_ij=%.1f, mb_ij=%.1f\n",
+                    n_ij, nd_ij, md_ij, mb_ij);
+        }
+        
+        double error_div3 = error_rate_j / 3.0;
+        if (error_div3 < 1e-100) error_div3 = 1e-100;
+        
+        // Calculate Q in log space using unified rates
+        double log_damage = safe_log(damage_rate_j);
+        double log_1_minus_damage = safe_log(1.0 - damage_rate_j);
+        double log_error_div3 = safe_log(error_div3);
+        double log_1_minus_error = safe_log(1.0 - error_rate_j);
+        
+        double log_Q = md_ij * log_damage + 
+                      (nd_ij - md_ij) * log_1_minus_damage +
+                      mb_ij * log_error_div3 +
+                      (n_ij - md_ij - mb_ij) * log_1_minus_error;
+        
+        sparse_em_data->Q_sparse[idx] = safe_exp(log_Q);
+    }
+    
+    // Step 2: Calculate Q values for taxonomic group alignments
+    // Store them in the expanded Q_sparse array right after genome entries
+    if (sparse_em_data->n_taxonomic_groups > 0 && sparse->read_taxonomic_data) {
+        
+        int tax_q_idx = sparse->nnz;  // Start taxonomic Q values after genome entries
+        
+        // Process each read's taxonomic data
+        for (int read_idx = 0; read_idx < sparse_em_data->n_reads; read_idx++) {
+            const read_taxonomic_data_t *tax_data = &sparse->read_taxonomic_data[read_idx];
+            
+            if (tax_data->n_taxa > 0) {
+                for (int t = 0; t < tax_data->n_taxa; t++) {
+                    int tax_global_idx = tax_data->taxon_indices[t];
+                    if (tax_global_idx < 0 || tax_global_idx >= sparse_em_data->n_taxonomic_groups) continue;
+                    
+                    // Map to unified array index: genomes first, then taxonomic groups
+                    int unified_idx = sparse_em_data->n_genomes + tax_global_idx;
+                    
+                    // Skip inactive taxonomic groups
+                    if (sparse_em_data->unified_active_entities && !sparse_em_data->unified_active_entities[unified_idx]) {
+                        sparse_em_data->Q_sparse[tax_q_idx] = 0.0;
+                        tax_q_idx++;
+                        continue;
+                    }
+                    
+                    double error_rate_t = sparse_em_data->unified_error_rates[unified_idx];
+                    double damage_rate_t = sparse_em_data->unified_damage_rates[unified_idx];
+                    double error_div3 = error_rate_t / 3.0;
+                    if (error_div3 < 1e-100) error_div3 = 1e-100;
+                    
+                    // Get read's total sites from genome alignment (all alignments in same read should have same n_i)
+                    int genome_start = sparse->row_ptr[read_idx];
+                    int genome_end = sparse->row_ptr[read_idx + 1];
+                    if (genome_start >= genome_end) {
+                        fprintf(stderr, "Error: Read %d has no genome alignments - cannot determine n_i for taxonomic groups\n", read_idx);
+                        exit(1);
+                    }
+                    double n_i = (double)sparse->n_values[genome_start];  // Use same n_i as genomes
+                    
+                    // Switch between integer and float formats for taxonomic data
+                    double nd_it, md_it, mb_it;
+                    
+                    if (!sparse_em_data->use_float_mb_format) {
+                        // Old integer format: nd, md, mb (ignore mds, mbs for simplicity)
+                        nd_it = (double)tax_data->nd_values[t];
+                        md_it = (double)tax_data->md_values[t];
+                        mb_it = (double)tax_data->mb_values[t];
+                    } else {
+                        // New float format: nd, md, mb (mb is float)
+                        nd_it = (double)tax_data->nd_values[t];
+                        md_it = (double)tax_data->md_values[t];
+                        mb_it = (double)tax_data->mb_values_float[t];  // Float value
+                    }
+                    
+                    // Calculate Q value for taxonomic group using CEDfull model
+                    double log_damage = safe_log(damage_rate_t);
+                    double log_1_minus_damage = safe_log(1.0 - damage_rate_t);
+                    double log_error_div3 = safe_log(error_div3);
+                    double log_1_minus_error = safe_log(1.0 - error_rate_t);
+                    
+                    double log_Q_tax = md_it * log_damage + 
+                                      (nd_it - md_it) * log_1_minus_damage +
+                                      mb_it * log_error_div3 +
+                                      (n_i - md_it - mb_it) * log_1_minus_error;
+                    
+                    // Store Q value in expanded Q_sparse array
+                    sparse_em_data->Q_sparse[tax_q_idx] = safe_exp(log_Q_tax);
+                    
+                    // Debug output removed for performance
+                    
+                    tax_q_idx++;
+                }
+            }
+        }
+    }
+}
+
+// Sparse E-step: Calculate posterior weights
+void sparse_em_e_step(sparse_em_data_t *sparse_em_data) {
+    const sparse_alignment_t *sparse = sparse_em_data->alignment_data;
+    
+    // For each read, calculate W_sparse[idx] = Q_sparse[idx] * proportion[j] / sum
+    for (int i = 0; i < sparse->n_reads; i++) {
+        // Skip removed reads
+        if (sparse_em_data->active_reads && !sparse_em_data->active_reads[i]) {
+            int start = sparse->row_ptr[i];
+            int end = sparse->row_ptr[i + 1];
+            for (int idx = start; idx < end; idx++) {
+                sparse_em_data->W_sparse[idx] = 0.0;
+            }
+            continue;
+        }
+        
+        int start = sparse->row_ptr[i];
+        int end = sparse->row_ptr[i + 1];
+        
+        // Calculate denominator (normalization factor)
+        double sum = 0.0;
+        
+        // Add contributions from aligned genomes (original logic)
+        for (int idx = start; idx < end; idx++) {
+            int j = sparse->col_indices[idx];
+            // Skip pruned genomes
+            if (sparse_em_data->active_genomes && !sparse_em_data->active_genomes[j]) {
+                continue;
+            }
+            sum += sparse_em_data->Q_sparse[idx] * sparse_em_data->proportions[j];
+        }
+        
+        // Add taxonomic group contributions using CSR structure
+        if (sparse_em_data->n_taxonomic_groups > 0 && sparse_em_data->taxonomic_proportions && sparse_em_data->Q_taxonomic_sparse) {
+            int tax_start = sparse_em_data->taxonomic_row_ptr[i];
+            int tax_end = sparse_em_data->taxonomic_row_ptr[i + 1];
+            
+            for (int tax_idx = tax_start; tax_idx < tax_end; tax_idx++) {
+                int tax_group = sparse_em_data->taxonomic_col_indices[tax_idx];
+                sum += sparse_em_data->Q_taxonomic_sparse[tax_idx] * sparse_em_data->taxonomic_proportions[tax_group];
+            }
+        }
+        
+        // Calculate W values (normalized Q * proportion)
+        if (sum > 0.0) {
+            // Calculate W for genome alignments (original logic)
+            for (int idx = start; idx < end; idx++) {
+                int j = sparse->col_indices[idx];
+                // Skip pruned genomes
+                if (sparse_em_data->active_genomes && !sparse_em_data->active_genomes[j]) {
+                    sparse_em_data->W_sparse[idx] = 0.0;
+                } else {
+                    sparse_em_data->W_sparse[idx] = (sparse_em_data->Q_sparse[idx] * sparse_em_data->proportions[j]) / sum;
+                }
+            }
+            
+            // Calculate W for taxonomic groups using CSR structure
+            if (sparse_em_data->n_taxonomic_groups > 0 && sparse_em_data->taxonomic_proportions && sparse_em_data->Q_taxonomic_sparse) {
+                int tax_start = sparse_em_data->taxonomic_row_ptr[i];
+                int tax_end = sparse_em_data->taxonomic_row_ptr[i + 1];
+                
+                for (int tax_idx = tax_start; tax_idx < tax_end; tax_idx++) {
+                    int tax_group = sparse_em_data->taxonomic_col_indices[tax_idx];
+                    sparse_em_data->W_taxonomic_sparse[tax_idx] = 
+                        (sparse_em_data->Q_taxonomic_sparse[tax_idx] * sparse_em_data->taxonomic_proportions[tax_group]) / sum;
+                }
+            }
+        } else {
+            // Handle zero sum case - set all W values to 0
+            for (int idx = start; idx < end; idx++) {
+                sparse_em_data->W_sparse[idx] = 0.0;
+            }
+            
+            // Also set taxonomic W values to 0 using CSR
+            if (sparse_em_data->n_taxonomic_groups > 0 && sparse_em_data->W_taxonomic_sparse) {
+                int tax_start = sparse_em_data->taxonomic_row_ptr[i];
+                int tax_end = sparse_em_data->taxonomic_row_ptr[i + 1];
+                
+                for (int tax_idx = tax_start; tax_idx < tax_end; tax_idx++) {
+                    sparse_em_data->W_taxonomic_sparse[tax_idx] = 0.0;
+                }
+            }
+        }
+    }
+}
+
+// Helper function to get taxonomic level for an entity
+// Returns a newly allocated lowercase string that the caller must free
+// Returns NULL if entity_idx is invalid or data is missing
+static char* get_entity_taxonomic_level(int entity_idx, sparse_em_data_t *sparse_em_data) {
+    if (!sparse_em_data) return NULL;
+
+    char *entity_type = NULL;
+
+    if (entity_idx < sparse_em_data->n_genomes) {
+        // Genome - always treated as "species"
+        entity_type = "species";
+    } else {
+        // Taxonomic group - get rank from taxonomic_groups array
+        int tax_idx = entity_idx - sparse_em_data->n_genomes;
+        if (tax_idx >= 0 && tax_idx < sparse_em_data->n_taxonomic_groups) {
+            const sparse_alignment_t *sparse = sparse_em_data->alignment_data;
+            if (sparse && sparse->taxonomic_groups && sparse->taxonomic_groups[tax_idx].rank) {
+                entity_type = sparse->taxonomic_groups[tax_idx].rank;
+            }
+        }
+    }
+
+    if (!entity_type) return NULL;
+
+    // Convert to lowercase and return a new string
+    char *result = malloc(strlen(entity_type) + 1);
+    if (!result) return NULL;
+
+    strcpy(result, entity_type);
+    for (char *p = result; *p; p++) {
+        *p = tolower(*p);
+    }
+
+    return result;
+}
+
+// Helper function to get Dirichlet prior alpha value for an entity
+// Returns the alpha weight for the entity's taxonomic level
+// Returns 1.0 if no weights are specified (equivalent to uniform prior)
+static double get_dirichlet_alpha(int entity_idx, sparse_em_data_t *sparse_em_data) {
+    // No weights specified - return default (uniform prior)
+    if (!sparse_em_data || !sparse_em_data->weights || sparse_em_data->n_weights == 0) {
+        return 1.0;
+    }
+
+    // Get the taxonomic level for this entity
+    char *taxonomic_level = get_entity_taxonomic_level(entity_idx, sparse_em_data);
+    if (!taxonomic_level) {
+        return 1.0;  // Fallback to default
+    }
+
+    // Look up the weight for this taxonomic level (case-insensitive match already done in get_entity_taxonomic_level)
+    double alpha = -1.0;  // Sentinel value indicating not found
+    for (int i = 0; i < sparse_em_data->n_weights; i++) {
+        if (strcmp(taxonomic_level, sparse_em_data->weights[i].taxonomic_level) == 0) {
+            alpha = sparse_em_data->weights[i].weight;
+            break;
+        }
+    }
+
+    // If not found, try "all_other"
+    if (alpha < 0.0) {
+        for (int i = 0; i < sparse_em_data->n_weights; i++) {
+            if (strcmp("all_other", sparse_em_data->weights[i].taxonomic_level) == 0) {
+                alpha = sparse_em_data->weights[i].weight;
+                break;
+            }
+        }
+    }
+
+    // If still not found, use default
+    if (alpha < 0.0) {
+        alpha = 1.0;
+    }
+
+    free(taxonomic_level);
+    return alpha;
+}
+
+// Helper function to apply parameter constraints
+double apply_error_rate_constraints(double rate, int entity_idx, sparse_em_data_t *sparse_em_data, sparse_em_data_t *data_with_constraints) {
+    if (!data_with_constraints || !data_with_constraints->constraints || data_with_constraints->n_constraints == 0) {
+        // No constraints - use default bounds
+        if (rate < 1e-6) return 1e-6;
+        if (rate > 0.5) return 0.5;
+        return rate;
+    }
+    
+    // Determine entity type for this index
+    char *entity_type = NULL;
+    if (entity_idx < sparse_em_data->n_genomes) {
+        // Genome
+        entity_type = "species";
+    } else {
+        // Taxonomic group - get rank from name
+        int tax_idx = entity_idx - sparse_em_data->n_genomes;
+        if (tax_idx >= 0 && tax_idx < sparse_em_data->n_taxonomic_groups) {
+            const sparse_alignment_t *sparse = sparse_em_data->alignment_data;
+            if (sparse->taxonomic_groups && sparse->taxonomic_groups[tax_idx].rank) {
+                entity_type = sparse->taxonomic_groups[tax_idx].rank;
+            }
+        }
+    }
+    
+    if (!entity_type) {
+        // Fallback to default bounds
+        if (rate < 1e-6) return 1e-6;
+        if (rate > 0.5) return 0.5;
+        return rate;
+    }
+    
+    // Apply constraints for this entity type (case insensitive)
+    double min_bound = 1e-6;  // Default minimum
+    double max_bound = 0.5;   // Default maximum
+    
+    for (int i = 0; i < data_with_constraints->n_constraints; i++) {
+        parameter_constraint_t *c = &data_with_constraints->constraints[i];
+        
+        // Case insensitive comparison
+        char *lower_entity = malloc(strlen(entity_type) + 1);
+        strcpy(lower_entity, entity_type);
+        for (char *p = lower_entity; *p; p++) {
+            *p = tolower(*p);
+        }
+        
+        if (strcmp(lower_entity, c->entity_type) == 0) {
+            // Only apply inequality constraints here (equality handled by mask)
+            if (c->type == CONSTRAINT_INEQUALITY) {
+                if (c->min_bound >= 0) min_bound = c->min_bound;
+                if (c->max_bound >= 0) max_bound = c->max_bound;
+            }
+        }
+        
+        free(lower_entity);
+    }
+    
+    // Apply bounds
+    if (rate < min_bound) return min_bound;
+    if (rate > max_bound) return max_bound;
+    return rate;
+}
+
+// Build mask arrays indicating which parameters are fixed by equality constraints
+void build_fixed_parameter_masks(sparse_em_data_t *sparse_em_data) {
+    if (!sparse_em_data) return;
+
+    int total_entities = sparse_em_data->n_genomes + sparse_em_data->n_taxonomic_groups;
+
+    // Allocate mask arrays (initialize to 0 = free)
+    sparse_em_data->error_rate_fixed_mask = calloc(total_entities, sizeof(int));
+    sparse_em_data->error_rate_fixed_values = calloc(total_entities, sizeof(double));
+
+    if (!sparse_em_data->error_rate_fixed_mask || !sparse_em_data->error_rate_fixed_values) {
+        fprintf(stderr, "Error: Failed to allocate fixed parameter masks\n");
+        // Clean up any partially allocated arrays
+        free(sparse_em_data->error_rate_fixed_mask);
+        free(sparse_em_data->error_rate_fixed_values);
+        sparse_em_data->error_rate_fixed_mask = NULL;
+        sparse_em_data->error_rate_fixed_values = NULL;
+        return;
+    }
+
+    // No constraints? All parameters are free
+    if (!sparse_em_data->constraints || sparse_em_data->n_constraints == 0) {
+        return;
+    }
+
+    // For each entity, check if it has an equality constraint
+    for (int j = 0; j < total_entities; j++) {
+        // Determine entity type
+        char *entity_type = NULL;
+        if (j < sparse_em_data->n_genomes) {
+            entity_type = "species";
+        } else {
+            int tax_idx = j - sparse_em_data->n_genomes;
+            if (tax_idx >= 0 && tax_idx < sparse_em_data->n_taxonomic_groups) {
+                const sparse_alignment_t *sparse = sparse_em_data->alignment_data;
+                if (sparse->taxonomic_groups && sparse->taxonomic_groups[tax_idx].rank) {
+                    entity_type = sparse->taxonomic_groups[tax_idx].rank;
+                }
+            }
+        }
+
+        if (!entity_type) continue;
+
+        // Convert to lowercase for comparison
+        char *lower_entity = malloc(strlen(entity_type) + 1);
+        strcpy(lower_entity, entity_type);
+        for (char *p = lower_entity; *p; p++) {
+            *p = tolower(*p);
+        }
+
+        // Check for equality constraint
+        for (int i = 0; i < sparse_em_data->n_constraints; i++) {
+            parameter_constraint_t *c = &sparse_em_data->constraints[i];
+            if (c->type == CONSTRAINT_EQUALITY && strcmp(lower_entity, c->entity_type) == 0) {
+                // Mark as fixed for error rates only
+                sparse_em_data->error_rate_fixed_mask[j] = 1;
+                sparse_em_data->error_rate_fixed_values[j] = c->fixed_value;
+                break;  // Only one equality constraint per entity
+            }
+        }
+
+        free(lower_entity);
+    }
+}
+
+void sparse_em_m_step(sparse_em_data_t *sparse_em_data, em_method_t method) {
+    const sparse_alignment_t *sparse = sparse_em_data->alignment_data;
+    
+    // Initialize genome proportions (original logic)
+    if (sparse_em_data->active_genomes) {
+        for (int j = 0; j < sparse->n_genomes; j++) {
+            sparse_em_data->proportions[j] = sparse_em_data->active_genomes[j] ? 0.0 : 0.0;
+        }
+    } else {
+        for (int j = 0; j < sparse->n_genomes; j++) {
+            sparse_em_data->proportions[j] = 0.0;
+        }
+    }
+    
+    // Sum weights for each genome (original logic)
+    for (int idx = 0; idx < sparse->nnz; idx++) {
+        int j = sparse->col_indices[idx];
+        if (sparse_em_data->active_genomes && !sparse_em_data->active_genomes[j]) {
+            continue;
+        }
+        sparse_em_data->proportions[j] += sparse_em_data->W_sparse[idx];
+    }
+    
+    // Sum weights for taxonomic groups using CSR structure
+    if (sparse_em_data->n_taxonomic_groups > 0 && sparse_em_data->taxonomic_proportions && sparse_em_data->W_taxonomic_sparse) {
+        // Initialize taxonomic proportions
+        for (int t = 0; t < sparse_em_data->n_taxonomic_groups; t++) {
+            sparse_em_data->taxonomic_proportions[t] = 0.0;
+        }
+        
+        // Sum weights for taxonomic groups
+        for (int tax_idx = 0; tax_idx < sparse_em_data->n_taxonomic_entries; tax_idx++) {
+            int tax_group = sparse_em_data->taxonomic_col_indices[tax_idx];
+            int unified_idx = sparse_em_data->n_genomes + tax_group;
+
+            // Skip pruned taxonomic groups
+            if (sparse_em_data->unified_active_entities && !sparse_em_data->unified_active_entities[unified_idx]) {
+                continue;
+            }
+
+            sparse_em_data->taxonomic_proportions[tax_group] += sparse_em_data->W_taxonomic_sparse[tax_idx];
+        }
+    }
+    
+    // Apply Dirichlet prior and divide by appropriate normalizer
+    // If weights are specified: π_k = (Σᵢ γᵢₖ + α_k - 1) / (N + Σⱼ α_j - K)
+    // Otherwise: π_k = Σᵢ γᵢₖ / N (original logic)
+
+    int N = sparse_em_data->n_active_reads > 0 ? sparse_em_data->n_active_reads : sparse->n_reads;
+    double divisor = (double)N;
+
+    // Calculate Dirichlet prior terms if weights are specified
+    if (sparse_em_data->weights && sparse_em_data->n_weights > 0) {
+        // Count active entities K
+        int K = 0;
+        if (sparse_em_data->active_genomes) {
+            for (int j = 0; j < sparse->n_genomes; j++) {
+                if (sparse_em_data->active_genomes[j]) K++;
+            }
+        } else {
+            K = sparse->n_genomes;
+        }
+
+        if (sparse_em_data->n_taxonomic_groups > 0) {
+            if (sparse_em_data->unified_active_entities) {
+                for (int t = 0; t < sparse_em_data->n_taxonomic_groups; t++) {
+                    int unified_idx = sparse_em_data->n_genomes + t;
+                    if (sparse_em_data->unified_active_entities[unified_idx]) K++;
+                }
+            } else {
+                K += sparse_em_data->n_taxonomic_groups;
+            }
+        }
+
+        // Calculate sum of all alpha values for active entities
+        double sum_alpha = 0.0;
+        if (sparse_em_data->active_genomes) {
+            for (int j = 0; j < sparse->n_genomes; j++) {
+                if (sparse_em_data->active_genomes[j]) {
+                    sum_alpha += get_dirichlet_alpha(j, sparse_em_data);
+                }
+            }
+        } else {
+            for (int j = 0; j < sparse->n_genomes; j++) {
+                sum_alpha += get_dirichlet_alpha(j, sparse_em_data);
+            }
+        }
+
+        if (sparse_em_data->n_taxonomic_groups > 0) {
+            if (sparse_em_data->unified_active_entities) {
+                for (int t = 0; t < sparse_em_data->n_taxonomic_groups; t++) {
+                    int unified_idx = sparse_em_data->n_genomes + t;
+                    if (sparse_em_data->unified_active_entities[unified_idx]) {
+                        sum_alpha += get_dirichlet_alpha(unified_idx, sparse_em_data);
+                    }
+                }
+            } else {
+                for (int t = 0; t < sparse_em_data->n_taxonomic_groups; t++) {
+                    int unified_idx = sparse_em_data->n_genomes + t;
+                    sum_alpha += get_dirichlet_alpha(unified_idx, sparse_em_data);
+                }
+            }
+        }
+
+        // Update divisor: N + Σⱼ α_j - K
+        divisor = (double)N + sum_alpha - (double)K;
+
+        // Add (α_k - 1) to genome proportions
+        if (sparse_em_data->active_genomes) {
+            for (int j = 0; j < sparse->n_genomes; j++) {
+                if (sparse_em_data->active_genomes[j]) {
+                    double alpha_k = get_dirichlet_alpha(j, sparse_em_data);
+                    sparse_em_data->proportions[j] += (alpha_k - 1.0);
+                }
+            }
+        } else {
+            for (int j = 0; j < sparse->n_genomes; j++) {
+                double alpha_k = get_dirichlet_alpha(j, sparse_em_data);
+                sparse_em_data->proportions[j] += (alpha_k - 1.0);
+            }
+        }
+
+        // Add (α_k - 1) to taxonomic proportions
+        if (sparse_em_data->n_taxonomic_groups > 0 && sparse_em_data->taxonomic_proportions) {
+            if (sparse_em_data->unified_active_entities) {
+                for (int t = 0; t < sparse_em_data->n_taxonomic_groups; t++) {
+                    int unified_idx = sparse_em_data->n_genomes + t;
+                    if (sparse_em_data->unified_active_entities[unified_idx]) {
+                        double alpha_k = get_dirichlet_alpha(unified_idx, sparse_em_data);
+                        sparse_em_data->taxonomic_proportions[t] += (alpha_k - 1.0);
+                    }
+                }
+            } else {
+                for (int t = 0; t < sparse_em_data->n_taxonomic_groups; t++) {
+                    int unified_idx = sparse_em_data->n_genomes + t;
+                    double alpha_k = get_dirichlet_alpha(unified_idx, sparse_em_data);
+                    sparse_em_data->taxonomic_proportions[t] += (alpha_k - 1.0);
+                }
+            }
+        }
+    }
+
+    // Divide genome proportions by divisor
+    if (sparse_em_data->active_genomes) {
+        for (int j = 0; j < sparse->n_genomes; j++) {
+            if (sparse_em_data->active_genomes[j]) {
+                sparse_em_data->proportions[j] /= divisor;
+            }
+        }
+    } else {
+        for (int j = 0; j < sparse->n_genomes; j++) {
+            sparse_em_data->proportions[j] /= divisor;
+        }
+    }
+
+    // Divide taxonomic proportions by divisor
+    if (sparse_em_data->n_taxonomic_groups > 0 && sparse_em_data->taxonomic_proportions) {
+        for (int t = 0; t < sparse_em_data->n_taxonomic_groups; t++) {
+            int unified_idx = sparse_em_data->n_genomes + t;
+
+            // Skip pruned taxonomic groups
+            if (sparse_em_data->unified_active_entities && !sparse_em_data->unified_active_entities[unified_idx]) {
+                continue;
+            }
+
+            sparse_em_data->taxonomic_proportions[t] /= divisor;
+        }
+    }
+    
+    
+    // Normalize genome and taxonomic proportions jointly to sum to 1.0
+    double total = 0.0;
+    
+    // Sum genome proportions
+    if (sparse_em_data->active_genomes) {
+        for (int j = 0; j < sparse->n_genomes; j++) {
+            if (sparse_em_data->active_genomes[j]) {
+                total += sparse_em_data->proportions[j];
+            }
+        }
+    } else {
+        for (int j = 0; j < sparse->n_genomes; j++) {
+            total += sparse_em_data->proportions[j];
+        }
+    }
+    
+    // Add taxonomic proportions to total
+    if (sparse_em_data->n_taxonomic_groups > 0 && sparse_em_data->taxonomic_proportions) {
+        for (int t = 0; t < sparse_em_data->n_taxonomic_groups; t++) {
+            int unified_idx = sparse_em_data->n_genomes + t;
+
+            // Skip pruned taxonomic groups
+            if (sparse_em_data->unified_active_entities && !sparse_em_data->unified_active_entities[unified_idx]) {
+                continue;
+            }
+
+            total += sparse_em_data->taxonomic_proportions[t];
+        }
+    }
+    
+    // Normalize both arrays by the same total
+    if (total > EM_DOUBLE_MIN && fabs(total - 1.0) > 1e-9) {
+        // Normalize genome proportions
+        if (sparse_em_data->active_genomes) {
+            for (int j = 0; j < sparse->n_genomes; j++) {
+                if (sparse_em_data->active_genomes[j]) {
+                    sparse_em_data->proportions[j] /= total;
+                }
+            }
+        } else {
+            for (int j = 0; j < sparse->n_genomes; j++) {
+                sparse_em_data->proportions[j] /= total;
+            }
+        }
+        
+        // Normalize taxonomic proportions
+        if (sparse_em_data->n_taxonomic_groups > 0 && sparse_em_data->taxonomic_proportions) {
+            for (int t = 0; t < sparse_em_data->n_taxonomic_groups; t++) {
+                int unified_idx = sparse_em_data->n_genomes + t;
+
+                // Skip pruned taxonomic groups
+                if (sparse_em_data->unified_active_entities && !sparse_em_data->unified_active_entities[unified_idx]) {
+                    continue;
+                }
+
+                sparse_em_data->taxonomic_proportions[t] /= total;
+            }
+        }
+    }
+    
+    // Update error rate for AE and BE methods
+    if (method == METHOD_AE || method == METHOD_BE) {
+        double numerator = 0.0;
+        double denominator = 0.0;
+        
+        for (int idx = 0; idx < sparse->nnz; idx++) {
+            double weight = sparse_em_data->W_sparse[idx];
+            double d_ij = sparse->d_values[idx];
+            double n_ij = sparse->n_values[idx];
+            
+            numerator += weight * d_ij;
+            denominator += weight * n_ij;
+        }
+        
+        if (denominator > EM_DOUBLE_MIN) {
+            sparse_em_data->error_rate = numerator / denominator;
+            
+            // Clamp error rate to reasonable bounds
+            if (sparse_em_data->error_rate < 1e-6) {
+                sparse_em_data->error_rate = 1e-6;
+            } else if (sparse_em_data->error_rate > 0.5) {
+                sparse_em_data->error_rate = 0.5;
+            }
+        }
+    }
+    
+    // Update per-genome error rates for BEfull
+    if (method == METHOD_BEFULL) {
+        // Initialize accumulators for all genomes
+        double *numerator = calloc(sparse->n_genomes, sizeof(double));
+        double *denominator = calloc(sparse->n_genomes, sizeof(double));
+        
+        // Single pass through all alignments to accumulate statistics
+        for (int idx = 0; idx < sparse->nnz; idx++) {
+            int j = sparse->col_indices[idx];
+            double weight = sparse_em_data->W_sparse[idx];
+            double d_ij = sparse->d_values[idx];
+            double n_ij = sparse->n_values[idx];
+            
+            numerator[j] += weight * d_ij;
+            denominator[j] += weight * n_ij;
+        }
+        
+        // EFFICIENCY: Update error rates only for active genomes
+        for (int j = 0; j < sparse->n_genomes; j++) {
+            // Skip inactive genomes
+            if (sparse_em_data->active_genomes && !sparse_em_data->active_genomes[j]) {
+                continue;
+            }
+            
+            if (denominator[j] > EM_DOUBLE_MIN) {
+                sparse_em_data->error_rates[j] = numerator[j] / denominator[j];
+                
+                // Clamp error rate to reasonable bounds
+                if (sparse_em_data->error_rates[j] < 1e-6) {
+                    sparse_em_data->error_rates[j] = 1e-6;
+                } else if (sparse_em_data->error_rates[j] > 0.5) {
+                    sparse_em_data->error_rates[j] = 0.5;
+                }
+            }
+        }
+        
+        // Free temporary arrays
+        free(numerator);
+        free(denominator);
+    }
+    
+    // Update rates for damage methods
+    if (method == METHOD_CE || method == METHOD_CED) {
+        // Check if damage arrays are available
+        if (sparse->nd_values && sparse->md_values && sparse->mb_values) {
+            // Update background error rate for CE and CED
+            double bg_numerator = 0.0;
+            double bg_denominator = 0.0;
+            
+            for (int idx = 0; idx < sparse->nnz; idx++) {
+                double weight = sparse_em_data->W_sparse[idx];
+                double n_ij = sparse->n_values[idx];
+                double md_ij = sparse->md_values[idx];
+                double mb_ij = sparse->mb_values[idx];
+                
+                bg_numerator += weight * mb_ij;
+                bg_denominator += weight * (n_ij - md_ij);
+            }
+            
+            
+            if (bg_denominator > EM_DOUBLE_MIN) {
+                sparse_em_data->error_rate = bg_numerator / bg_denominator;
+                
+                // Clamp error rate
+                if (sparse_em_data->error_rate < 1e-6) {
+                    sparse_em_data->error_rate = 1e-6;
+                } else if (sparse_em_data->error_rate > 0.5) {
+                    sparse_em_data->error_rate = 0.5;
+                }
+            }
+            
+            // Update damage rate for CED
+            if (method == METHOD_CED) {
+                double dmg_numerator = 0.0;
+                double dmg_denominator = 0.0;
+                
+                for (int idx = 0; idx < sparse->nnz; idx++) {
+                    double weight = sparse_em_data->W_sparse[idx];
+                    double nd_ij = sparse->nd_values[idx];
+                    double md_ij = sparse->md_values[idx];
+                    
+                    dmg_numerator += weight * md_ij;
+                    dmg_denominator += weight * nd_ij;
+                }
+                
+                if (dmg_denominator > EM_DOUBLE_MIN) {
+                    sparse_em_data->damage_rate = dmg_numerator / dmg_denominator;
+                    
+                    // Clamp damage rate
+                    if (sparse_em_data->damage_rate < 0.0) {
+                        sparse_em_data->damage_rate = 0.0;
+                    } else if (sparse_em_data->damage_rate > 1.0) {
+                        sparse_em_data->damage_rate = 1.0;
+                    }
+                }
+            }
+        }
+    }
+    
+    // Update per-genome error rates for CEfull (fixed damage rate)
+    if (method == METHOD_CEFULL) {
+        // Check if damage arrays are available
+        if (sparse->nd_values && sparse->md_values && sparse->mb_values) {
+            // Initialize accumulators for all genomes
+            double *numerator = calloc(sparse->n_genomes, sizeof(double));
+            double *denominator = calloc(sparse->n_genomes, sizeof(double));
+            
+            // Single pass through all alignments to accumulate statistics
+            for (int idx = 0; idx < sparse->nnz; idx++) {
+                int j = sparse->col_indices[idx];
+                double weight = sparse_em_data->W_sparse[idx];
+                double n_ij = sparse->n_values[idx];
+                double md_ij = sparse->md_values[idx];
+                double mb_ij = sparse->mb_values[idx];
+                
+                numerator[j] += weight * mb_ij;
+                denominator[j] += weight * (n_ij - md_ij);
+            }
+            
+            // EFFICIENCY: Update error rates only for active genomes
+            for (int j = 0; j < sparse->n_genomes; j++) {
+                // Skip inactive genomes
+                if (sparse_em_data->active_genomes && !sparse_em_data->active_genomes[j]) {
+                    continue;
+                }
+                
+                if (denominator[j] > EM_DOUBLE_MIN) {
+                    sparse_em_data->error_rates[j] = numerator[j] / denominator[j];
+                    
+                    // Clamp error rate to reasonable bounds
+                    if (sparse_em_data->error_rates[j] < 1e-6) {
+                        sparse_em_data->error_rates[j] = 1e-6;
+                    } else if (sparse_em_data->error_rates[j] > 0.5) {
+                        sparse_em_data->error_rates[j] = 0.5;
+                    }
+                }
+            }
+            
+            // Free temporary arrays
+            free(numerator);
+            free(denominator);
+        }
+    }
+    
+    // Update per-genome error and damage rates for CEDfull
+    if (method == METHOD_CEDFULL) {
+        // Check if damage arrays are available
+        if (sparse->nd_values && sparse->md_values && sparse->mb_values) {
+            // Initialize accumulators for all entities (genomes + taxonomic groups)
+            int total_entities = sparse->n_genomes + sparse_em_data->n_taxonomic_groups;
+            double *err_numerator = calloc(total_entities, sizeof(double));
+            double *err_denominator = calloc(total_entities, sizeof(double));
+
+            // Damage rate: conditional allocation based on mode
+            double *dmg_numerator = NULL;
+            double *dmg_denominator = NULL;
+            double total_dmg_numerator = 0.0;
+            double total_dmg_denominator = 0.0;
+
+            if (sparse_em_data->joint_damage_rate == 0) {
+                // SEPARATE mode: allocate per-entity arrays
+                dmg_numerator = calloc(total_entities, sizeof(double));
+                dmg_denominator = calloc(total_entities, sizeof(double));
+            }
+            // JOINT mode: use scalar accumulators (already initialized above)
+
+            // Single pass through all alignments to accumulate statistics
+            static int accumulation_call = 0;
+            accumulation_call++;
+            int bad_index_count = 0;
+
+            for (int idx = 0; idx < sparse->nnz; idx++) {
+                int j = sparse->col_indices[idx];
+
+                // DEBUG: Check for out-of-range genome indices
+                if (j < 0 || j >= sparse->n_genomes) {
+                    bad_index_count++;
+                    if (bad_index_count <= 5 && accumulation_call == 1) {
+                        fprintf(stderr, "[ACCUMULATION BUG] idx=%d has j=%d (should be in [0,%d))\n",
+                                idx, j, sparse->n_genomes);
+                    }
+                    continue;  // Skip invalid indices
+                }
+
+                double weight = sparse_em_data->W_sparse[idx];
+                double n_ij = sparse->n_values[idx];
+                double nd_ij = sparse->nd_values[idx];
+                double md_ij = sparse->md_values[idx];
+                double mb_ij = sparse->mb_values[idx];
+
+                // Accumulate for error rate
+                err_numerator[j] += weight * mb_ij;
+                err_denominator[j] += weight * (n_ij - md_ij);
+
+                // Accumulate for damage rate (mode-dependent)
+                if (sparse_em_data->joint_damage_rate == 0) {
+                    // SEPARATE mode: per-entity accumulation
+                    dmg_numerator[j] += weight * md_ij;
+                    dmg_denominator[j] += weight * nd_ij;
+                } else {
+                    // JOINT mode: global accumulation
+                    total_dmg_numerator += weight * md_ij;
+                    total_dmg_denominator += weight * nd_ij;
+                }
+            }
+
+            // Accumulate statistics for taxonomic groups using CSR structure
+            if (sparse_em_data->n_taxonomic_groups > 0 && sparse_em_data->taxonomic_row_ptr && sparse_em_data->W_taxonomic_sparse) {
+                for (int read_idx = 0; read_idx < sparse->n_reads; read_idx++) {
+                    int tax_start = sparse_em_data->taxonomic_row_ptr[read_idx];
+                    int tax_end = sparse_em_data->taxonomic_row_ptr[read_idx + 1];
+
+                    // Get n_i from genome data
+                    int genome_start = sparse->row_ptr[read_idx];
+                    if (genome_start < sparse->nnz) {
+                        double n_i = (double)sparse->n_values[genome_start];
+
+                        for (int tax_idx = tax_start; tax_idx < tax_end; tax_idx++) {
+                            int tax_group = sparse_em_data->taxonomic_col_indices[tax_idx];
+                            int entity_idx = sparse->n_genomes + tax_group;
+
+                            double weight = sparse_em_data->W_taxonomic_sparse[tax_idx];
+                            
+                            // Get taxonomic data
+                            const read_taxonomic_data_t *tax_data = &sparse->read_taxonomic_data[read_idx];
+                            int t = tax_idx - tax_start;
+                            
+                            if (t >= 0 && t < tax_data->n_taxa) {
+                                double nd_it = (double)tax_data->nd_values[t];
+                                double md_it = (double)tax_data->md_values[t];
+                                double mb_it;
+                                
+                                if (sparse_em_data->use_float_mb_format) {
+                                    mb_it = (double)tax_data->mb_values_float[t];
+                                } else {
+                                    mb_it = (double)tax_data->mb_values[t];
+                                }
+                                
+                                // Accumulate for error rate
+                                err_numerator[entity_idx] += weight * mb_it;
+                                err_denominator[entity_idx] += weight * (n_i - md_it);
+
+                                // Accumulate for damage rate (mode-dependent)
+                                if (sparse_em_data->joint_damage_rate == 0) {
+                                    // SEPARATE mode: per-entity accumulation
+                                    dmg_numerator[entity_idx] += weight * md_it;
+                                    dmg_denominator[entity_idx] += weight * nd_it;
+                                } else {
+                                    // JOINT mode: global accumulation
+                                    total_dmg_numerator += weight * md_it;
+                                    total_dmg_denominator += weight * nd_it;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+
+            // EFFICIENCY: Update rates for all entities (genomes + taxonomic groups)
+            for (int j = 0; j < total_entities; j++) {
+                // Skip inactive entities
+                if (j < sparse->n_genomes) {
+                    // Genome: use active_genomes
+                    if (sparse_em_data->active_genomes && !sparse_em_data->active_genomes[j]) {
+                        continue;
+                    }
+                } else {
+                    // Taxonomic group: use unified_active_entities if available, otherwise assume active
+                    if (sparse_em_data->unified_active_entities && !sparse_em_data->unified_active_entities[j]) {
+                        continue;
+                    }
+                }
+
+                // DEBUG: Track specific genomes with dmg=0.1
+                int is_problem_genome = (j == 0 || j == 5972 || j == 7361 || j == 7394);
+
+                // DEBUG: Check active status
+                if (is_problem_genome && j < sparse_em_data->n_genomes) {
+                }
+
+                // Update error rate (skip if fixed by equality constraint)
+                if (err_denominator[j] > EM_DOUBLE_MIN) {
+                    // Check if this parameter is fixed
+                    int is_fixed = (sparse_em_data->error_rate_fixed_mask &&
+                                   sparse_em_data->error_rate_fixed_mask[j]);
+
+                    if (!is_fixed) {
+                        double new_rate = err_numerator[j] / err_denominator[j];
+                        // Apply constraints (inequality bounds only, no equality here)
+                        double constrained_rate = apply_error_rate_constraints(new_rate, j, sparse_em_data, sparse_em_data);
+                        sparse_em_data->error_rates[j] = constrained_rate;
+                    }
+                    // else: parameter stays at fixed value, no update
+
+                    if (j >= sparse_em_data->n_genomes) {
+                        int tax_idx = j - sparse_em_data->n_genomes;
+                    }
+
+                }
+
+                // Update damage rate (SEPARATE mode only - inside entity loop)
+                if (sparse_em_data->joint_damage_rate == 0) {
+                    if (dmg_denominator[j] > EM_DOUBLE_MIN) {
+                        sparse_em_data->damage_rates[j] = dmg_numerator[j] / dmg_denominator[j];
+
+                        // Clamp damage rate to [0,1]
+                        if (sparse_em_data->damage_rates[j] < 0.0) {
+                            sparse_em_data->damage_rates[j] = 0.0;
+                        } else if (sparse_em_data->damage_rates[j] > 1.0) {
+                            sparse_em_data->damage_rates[j] = 1.0;
+                        }
+                    }
+                }
+            }
+
+            // Update damage rate (JOINT mode - after entity loop)
+            if (sparse_em_data->joint_damage_rate == 1) {
+                if (total_dmg_denominator > EM_DOUBLE_MIN) {
+                    sparse_em_data->shared_damage_rate = total_dmg_numerator / total_dmg_denominator;
+
+                    // Clamp to [0,1]
+                    if (sparse_em_data->shared_damage_rate < 0.0) {
+                        sparse_em_data->shared_damage_rate = 0.0;
+                    } else if (sparse_em_data->shared_damage_rate > 1.0) {
+                        sparse_em_data->shared_damage_rate = 1.0;
+                    }
+                }
+
+                // Broadcast shared value to all entities
+                for (int j = 0; j < total_entities; j++) {
+                    sparse_em_data->damage_rates[j] = sparse_em_data->shared_damage_rate;
+                }
+            }
+
+            // Free temporary arrays
+            free(err_numerator);
+            free(err_denominator);
+            if (dmg_numerator) free(dmg_numerator);
+            if (dmg_denominator) free(dmg_denominator);
+        }
+    }
+}
+
+// Forward declarations for SQUAREM functions
+void sparse_fixed_point_C(double *x, double *fx, void *params);
+double sparse_objective_C(double *x, void *params);
+void sparse_fixed_point_CE(double *x, double *fx, void *params);
+double sparse_objective_CE(double *x, void *params);
+void sparse_fixed_point_CED(double *x, double *fx, void *params);
+double sparse_objective_CED(double *x, void *params);
+void sparse_fixed_point_CEfull(double *x, double *fx, void *params);
+double sparse_objective_CEfull(double *x, void *params);
+void sparse_fixed_point_CEDfull(double *x, double *fx, void *params);
+double sparse_objective_CEDfull(double *x, void *params);
+
+// Calculate log-likelihood for sparse data
+double sparse_calculate_log_likelihood(sparse_em_data_t *sparse_em_data) {
+    const sparse_alignment_t *sparse = sparse_em_data->alignment_data;
+    double log_likelihood = 0.0;
+    
+    
+    for (int i = 0; i < sparse->n_reads; i++) {
+        // Skip inactive reads if pruning arrays are initialized
+        if (sparse_em_data->active_reads && !sparse_em_data->active_reads[i]) {
+            continue;
+        }
+        
+        int start = sparse->row_ptr[i];
+        int end = sparse->row_ptr[i + 1];
+        
+        double read_likelihood = 0.0;
+        
+        // Add genome contributions
+        for (int idx = start; idx < end; idx++) {
+            int j = sparse->col_indices[idx];
+            // Skip inactive genomes in likelihood calculation
+            if (sparse_em_data->active_genomes && !sparse_em_data->active_genomes[j]) {
+                continue;
+            }
+            read_likelihood += sparse_em_data->Q_sparse[idx] * sparse_em_data->proportions[j];
+        }
+        
+        // Add taxonomic group contributions
+        if (sparse_em_data->Q_taxonomic_sparse && sparse_em_data->taxonomic_proportions) {
+            int tax_start = sparse_em_data->taxonomic_row_ptr[i];
+            int tax_end = sparse_em_data->taxonomic_row_ptr[i + 1];
+            for (int tax_idx = tax_start; tax_idx < tax_end; tax_idx++) {
+                int t = sparse_em_data->taxonomic_col_indices[tax_idx];
+                read_likelihood += sparse_em_data->Q_taxonomic_sparse[tax_idx] * sparse_em_data->taxonomic_proportions[t];
+            }
+        }
+        
+        
+        if (read_likelihood > EM_DOUBLE_MIN) {
+            log_likelihood += log(read_likelihood);
+        } else {
+            log_likelihood += log(EM_DOUBLE_MIN);
+        }
+    }
+
+    // Add Dirichlet prior contribution to log-posterior if weights are specified
+    // Prior term: Σⱼ (α_j - 1) * log(π_j)
+    if (sparse_em_data->weights && sparse_em_data->n_weights > 0) {
+        // Genome proportions
+        for (int j = 0; j < sparse->n_genomes; j++) {
+            if (sparse_em_data->active_genomes && !sparse_em_data->active_genomes[j]) {
+                continue;
+            }
+            double alpha = get_dirichlet_alpha(j, sparse_em_data);
+            if (sparse_em_data->proportions[j] > EM_DOUBLE_MIN) {
+                log_likelihood += (alpha - 1.0) * log(sparse_em_data->proportions[j]);
+            }
+        }
+
+        // Taxonomic group proportions
+        if (sparse_em_data->n_taxonomic_groups > 0 && sparse_em_data->taxonomic_proportions) {
+            for (int t = 0; t < sparse_em_data->n_taxonomic_groups; t++) {
+                int unified_idx = sparse->n_genomes + t;
+                if (sparse_em_data->unified_active_entities && !sparse_em_data->unified_active_entities[unified_idx]) {
+                    continue;
+                }
+                double alpha = get_dirichlet_alpha(unified_idx, sparse_em_data);
+                if (sparse_em_data->taxonomic_proportions[t] > EM_DOUBLE_MIN) {
+                    log_likelihood += (alpha - 1.0) * log(sparse_em_data->taxonomic_proportions[t]);
+                }
+            }
+        }
+    }
+
+    return log_likelihood;
+}
+
+// Forward declarations
+squarem_result_t* sparse_squarem_wrapper(double *par, int n_params, fixptfn_t fixptfn, 
+                                       objfn_t objfn, void *data, squarem_control_t *control);
+squarem_result_t* sparse_squarem_wrapper_no_pruning(double *par, int n_params, fixptfn_t fixptfn, 
+                                       objfn_t objfn, void *data, squarem_control_t *control);
+
+// =============================================================================
+// Active Parameter Mapping System for SQUAREM with Pruning
+// =============================================================================
+
+// Structure to hold mapping information between active and full parameter spaces
+typedef struct {
+    sparse_em_data_t *sparse_em_data;
+    em_method_t method;
+    int n_active_genomes;
+    int *active_genome_indices;  // Maps active index -> full genome index
+    int active_param_size;        // Size of active parameter vector
+    int full_param_size;          // Size of full parameter vector
+    double *full_params;          // Working buffer for full parameters
+    fixptfn_t original_fixpt;     // Original fixed-point function
+    objfn_t original_objfn;       // Original objective function
+} active_param_mapper_t;
+
+// Pack full parameters into active-only parameter vector
+
+
+
+
+// Check if pruning should occur at given iteration
+static int should_prune_at_iteration(int iter) {
+    // Prune at iterations: 1,2,3,4,5,10,20,30,40,50,60,70,80,90,100,150,200,250,300,350,400,450,500,550,...
+    if (iter <= 5) return 1;
+    if (iter == 10) return 1;
+    if (iter >= 20 && iter <= 100 && iter % 10 == 0) return 1;  // 20,30,40,50,60,70,80,90,100
+    if (iter == 150 || iter == 200 || iter == 250) return 1;
+    if (iter >= 300 && iter % 50 == 0) return 1;  // 300,350,400,450,500,550,...
+    return 0;
+}
+
+// Prune genomes and reads based on proportion threshold
+// Helper function to count active genomes
+static int sparse_count_active_genomes(sparse_em_data_t *sparse_em_data) {
+    if (!sparse_em_data->active_genomes) {
+        return sparse_em_data->n_genomes;  // All genomes active if no pruning done yet
+    }
+    
+    int count = 0;
+    for (int j = 0; j < sparse_em_data->n_genomes; j++) {
+        if (sparse_em_data->active_genomes[j]) {
+            count++;
+        }
+    }
+    return count;
+}
+
+static void sparse_prune_genomes_and_reads(sparse_em_data_t *sparse_em_data, double threshold) {
+    const sparse_alignment_t *sparse = sparse_em_data->alignment_data;
+
+    // Initialize active arrays if not already done
+    if (!sparse_em_data->active_genomes) {
+        sparse_em_data->active_genomes = malloc(sparse->n_genomes * sizeof(int));
+        sparse_em_data->active_reads = malloc(sparse->n_reads * sizeof(int));
+        if (!sparse_em_data->active_genomes || !sparse_em_data->active_reads) {
+            fprintf(stderr, "Error: Failed to allocate pruning arrays\n");
+            return;
+        }
+        // Initially all are active
+        for (int j = 0; j < sparse->n_genomes; j++) {
+            sparse_em_data->active_genomes[j] = 1;
+        }
+        for (int i = 0; i < sparse->n_reads; i++) {
+            sparse_em_data->active_reads[i] = 1;
+        }
+        sparse_em_data->n_active_genomes = sparse->n_genomes;
+        sparse_em_data->n_active_reads = sparse->n_reads;
+    }
+
+    // Initialize unified active entities array if we have taxonomic groups and haven't done so already
+    if (sparse_em_data->n_taxonomic_groups > 0 && !sparse_em_data->unified_active_entities) {
+        sparse_em_data->unified_active_entities = malloc(sparse_em_data->n_total_entities * sizeof(int));
+        if (!sparse_em_data->unified_active_entities) {
+            fprintf(stderr, "Error: Failed to allocate unified active entities array\n");
+            return;
+        }
+        // Initially all entities are active
+        for (int i = 0; i < sparse_em_data->n_total_entities; i++) {
+            sparse_em_data->unified_active_entities[i] = 1;
+        }
+        sparse_em_data->n_active_entities = sparse_em_data->n_total_entities;
+    }
+
+    // Mark genomes for pruning
+    int genomes_pruned = 0;
+    for (int j = 0; j < sparse->n_genomes; j++) {
+        if (sparse_em_data->active_genomes[j] && sparse_em_data->proportions[j] < threshold) {
+            sparse_em_data->active_genomes[j] = 0;
+            sparse_em_data->proportions[j] = 0.0;  // Explicitly set to 0
+            // Also update unified array if it exists
+            if (sparse_em_data->unified_active_entities) {
+                sparse_em_data->unified_active_entities[j] = 0;
+            }
+            genomes_pruned++;
+        }
+    }
+
+    // Mark taxonomic groups for pruning if they exist
+    int taxonomic_pruned = 0;
+    if (sparse_em_data->n_taxonomic_groups > 0 && sparse_em_data->taxonomic_proportions) {
+        for (int t = 0; t < sparse_em_data->n_taxonomic_groups; t++) {
+            int unified_idx = sparse_em_data->n_genomes + t;
+            if (sparse_em_data->unified_active_entities[unified_idx] &&
+                sparse_em_data->taxonomic_proportions[t] < threshold) {
+                sparse_em_data->unified_active_entities[unified_idx] = 0;
+                sparse_em_data->taxonomic_proportions[t] = 0.0;  // Explicitly set to 0
+                taxonomic_pruned++;
+            }
+        }
+    }
+
+    if (genomes_pruned == 0 && taxonomic_pruned == 0) return;  // Nothing to prune
+
+    sparse_em_data->n_active_genomes -= genomes_pruned;
+    if (sparse_em_data->n_active_entities > 0) {
+        sparse_em_data->n_active_entities -= (genomes_pruned + taxonomic_pruned);
+    }
+
+    // CRITICAL: Renormalize remaining proportions to sum to 1.0
+    // Need to consider both genomes and taxonomic groups together
+    double sum = 0.0;
+
+    // Sum active genome proportions
+    for (int j = 0; j < sparse->n_genomes; j++) {
+        if (sparse_em_data->active_genomes[j]) {
+            sum += sparse_em_data->proportions[j];
+        }
+    }
+
+    // Sum active taxonomic group proportions
+    if (sparse_em_data->n_taxonomic_groups > 0 && sparse_em_data->taxonomic_proportions) {
+        for (int t = 0; t < sparse_em_data->n_taxonomic_groups; t++) {
+            int unified_idx = sparse_em_data->n_genomes + t;
+            if (sparse_em_data->unified_active_entities[unified_idx]) {
+                sum += sparse_em_data->taxonomic_proportions[t];
+            }
+        }
+    }
+
+    // Renormalize all active proportions
+    if (sum > 0.0) {
+        for (int j = 0; j < sparse->n_genomes; j++) {
+            if (sparse_em_data->active_genomes[j]) {
+                sparse_em_data->proportions[j] /= sum;
+            }
+        }
+
+        if (sparse_em_data->n_taxonomic_groups > 0 && sparse_em_data->taxonomic_proportions) {
+            for (int t = 0; t < sparse_em_data->n_taxonomic_groups; t++) {
+                int unified_idx = sparse_em_data->n_genomes + t;
+                if (sparse_em_data->unified_active_entities[unified_idx]) {
+                    sparse_em_data->taxonomic_proportions[t] /= sum;
+                }
+            }
+        }
+    }
+
+    // Check which reads still have alignments (to active genomes)
+    // NOTE: Taxonomic groups don't directly align to reads, they aggregate genome alignments
+    int reads_removed = 0;
+    for (int i = 0; i < sparse->n_reads; i++) {
+        if (!sparse_em_data->active_reads[i]) continue;  // Already removed
+
+        int has_active_alignment = 0;
+        int start = sparse->row_ptr[i];
+        int end = sparse->row_ptr[i + 1];
+
+        for (int idx = start; idx < end; idx++) {
+            int j = sparse->col_indices[idx];
+            if (sparse_em_data->active_genomes[j]) {
+                has_active_alignment = 1;
+                break;
+            }
+        }
+
+        if (!has_active_alignment) {
+            sparse_em_data->active_reads[i] = 0;
+            reads_removed++;
+
+            // Write removed read name to file
+            if (sparse_em_data->removed_reads_file && sparse_em_data->read_names &&
+                sparse_em_data->read_names[i]) {
+                fprintf(sparse_em_data->removed_reads_file, "%s\n", sparse_em_data->read_names[i]);
+                fflush(sparse_em_data->removed_reads_file);
+            }
+        }
+    }
+
+    sparse_em_data->n_active_reads -= reads_removed;
+
+    // Updated output to show both genomes and taxonomic groups pruned
+    printf("  Pruned %d genomes and %d taxonomic groups (< %.2e), removed %d reads with no alignments\n",
+           genomes_pruned, taxonomic_pruned, threshold, reads_removed);
+    printf("  Active: %d/%d genomes, %d/%d taxonomic groups, %d/%d reads\n",
+           sparse_em_data->n_active_genomes, sparse->n_genomes,
+           sparse_em_data->n_active_entities - sparse_em_data->n_active_genomes,
+           sparse_em_data->n_taxonomic_groups,
+           sparse_em_data->n_active_reads, sparse->n_reads);
+    fflush(stdout);
+}
+
+// Main sparse EM algorithm
+int sparse_em_algorithm(sparse_em_data_t *sparse_em_data, em_method_t method, 
+                       double tolerance, int max_iterations, int use_squarem, int verbose,
+                       double min_proportion, const char *input_filename) {
+    
+    // Initialize proportions using data-driven approach
+    if (verbose) printf("Initializing proportions...\n");
+    sparse_initialize_proportions_data_driven(sparse_em_data);
+    
+    // Fix: Ensure initial proportions are jointly normalized (genomes + taxonomic groups sum to 1.0)
+    if (sparse_em_data->alignment_data->has_taxonomic_groups && sparse_em_data->taxonomic_proportions) {
+        double total_initial_proportion = 0.0;
+        
+        // Sum all initial proportions
+        for (int j = 0; j < sparse_em_data->n_genomes; j++) {
+            total_initial_proportion += sparse_em_data->proportions[j];
+        }
+        for (int t = 0; t < sparse_em_data->n_taxonomic_groups; t++) {
+            total_initial_proportion += sparse_em_data->taxonomic_proportions[t];
+        }
+        
+        // Joint normalization
+        if (total_initial_proportion > 0.0) {
+            for (int j = 0; j < sparse_em_data->n_genomes; j++) {
+                sparse_em_data->proportions[j] /= total_initial_proportion;
+            }
+            for (int t = 0; t < sparse_em_data->n_taxonomic_groups; t++) {
+                sparse_em_data->taxonomic_proportions[t] /= total_initial_proportion;
+            }
+            printf("Fixed initial proportions: total was %.6f, now normalized to 1.0\n", total_initial_proportion);
+        }
+    }
+    
+    // Set up pruning based on threshold
+    if (min_proportion < 0) {
+        // Use default threshold: min(0.00001, 10/n_reads)
+        double default_threshold = fmin(0.00001, 10.0 / sparse_em_data->n_reads);
+        min_proportion = default_threshold;
+        printf("Using dynamic pruning threshold: %.2e\n", min_proportion);
+    } else if (min_proportion == 0) {
+        // Pruning explicitly disabled
+        printf("Pruning disabled\n");
+    } else {
+        // Use user-specified threshold
+        printf("Using pruning threshold: %.2e\n", min_proportion);
+    }
+    
+    // Store min_proportion in sparse_em_data for access in SQUAREM wrapper
+    sparse_em_data->min_proportion = min_proportion;
+    
+    // Set up pruning if threshold is positive
+    if (min_proportion > 0.0) {
+        // Open removed reads file
+        if (input_filename) {
+            char removed_file[1024];
+            snprintf(removed_file, sizeof(removed_file), "%s.removed_reads.txt", input_filename);
+            sparse_em_data->removed_reads_file = fopen(removed_file, "w");
+            if (sparse_em_data->removed_reads_file) {
+                printf("Removed reads will be saved to: %s\n", removed_file);
+            }
+        }
+        
+        // Initialize active arrays
+        sparse_em_data->n_active_genomes = sparse_em_data->n_genomes;
+        sparse_em_data->n_active_reads = sparse_em_data->n_reads;
+    }
+    
+    // Initialize per-genome error rates for BEfull, CEfull, and CEDfull
+    if (method == METHOD_BEFULL || method == METHOD_CEFULL || method == METHOD_CEDFULL) {
+        if (verbose) printf("Initializing per-genome error rates...\n");
+        if (!sparse_em_data->error_rates) {
+            int total_entities = sparse_em_data->n_genomes + sparse_em_data->n_taxonomic_groups;
+            sparse_em_data->error_rates = malloc(total_entities * sizeof(double));
+            sparse_em_data->prev_error_rates = malloc(total_entities * sizeof(double));
+            if (!sparse_em_data->error_rates || !sparse_em_data->prev_error_rates) {
+                fprintf(stderr, "Error: Failed to allocate per-genome error rates\n");
+                return 0;
+            }
+        }
+        // Initialize error rates for genomes + taxonomic groups
+        int total_entities = sparse_em_data->n_genomes + sparse_em_data->n_taxonomic_groups;
+        for (int j = 0; j < total_entities; j++) {
+            sparse_em_data->error_rates[j] = sparse_em_data->error_rate;
+            sparse_em_data->prev_error_rates[j] = sparse_em_data->error_rate;
+        }
+        if (verbose) printf("%d total error rates initialized (genomes + taxonomic groups).\n", total_entities);
+        
+    }
+    
+    // Initialize per-genome damage rates for CEDfull and Model Full
+    if (method == METHOD_CEDFULL) {
+        if (verbose) printf("Initializing per-genome damage rates for CEDfull...\n");
+        if (!sparse_em_data->damage_rates) {
+            int total_entities = sparse_em_data->n_genomes + sparse_em_data->n_taxonomic_groups;
+            sparse_em_data->damage_rates = malloc(total_entities * sizeof(double));
+            sparse_em_data->prev_damage_rates = malloc(total_entities * sizeof(double));
+            if (!sparse_em_data->damage_rates || !sparse_em_data->prev_damage_rates) {
+                fprintf(stderr, "Error: Failed to allocate per-genome damage rates\n");
+                return 0;
+            }
+        }
+        // Initialize damage rates for genomes + taxonomic groups
+        int total_entities = sparse_em_data->n_genomes + sparse_em_data->n_taxonomic_groups;
+        for (int j = 0; j < total_entities; j++) {
+            sparse_em_data->damage_rates[j] = sparse_em_data->damage_rate;
+            sparse_em_data->prev_damage_rates[j] = sparse_em_data->damage_rate;
+        }
+
+        // Initialize shared damage rate
+        sparse_em_data->shared_damage_rate = sparse_em_data->damage_rate;
+
+        if (verbose) {
+            printf("CEDfull initialization complete. %d total damage rates initialized (genomes + taxonomic groups).\n", total_entities);
+            if (sparse_em_data->joint_damage_rate == 1) {
+                printf("Damage estimation: Joint (single shared damage rate)\n");
+            } else {
+                printf("Damage estimation: Separate (per-entity damage rates)\n");
+            }
+        }
+
+        // Build fixed parameter masks if using CEDfull with constraints
+        if (method == METHOD_CEDFULL && sparse_em_data->n_constraints > 0) {
+            build_fixed_parameter_masks(sparse_em_data);
+
+            // Check if masks were successfully allocated
+            if (!sparse_em_data->error_rate_fixed_mask) {
+                fprintf(stderr, "Error: Failed to build fixed parameter masks, constraints will be ignored\n");
+            } else {
+                // Initialize fixed parameters to their fixed values
+                int total_ent = sparse_em_data->n_genomes + sparse_em_data->n_taxonomic_groups;
+                for (int j = 0; j < total_ent; j++) {
+                    if (sparse_em_data->error_rate_fixed_mask[j]) {
+                        sparse_em_data->error_rates[j] = sparse_em_data->error_rate_fixed_values[j];
+                    }
+                }
+
+                if (verbose) {
+                    int n_fixed_err = 0;
+                    for (int j = 0; j < total_ent; j++) {
+                        if (sparse_em_data->error_rate_fixed_mask[j]) n_fixed_err++;
+                    }
+                    printf("Fixed parameters: %d error rates\n", n_fixed_err);
+                }
+            }
+        }
+
+    }
+
+    // Select Q calculation function
+    void (*calcQ_func)(sparse_em_data_t*);
+    
+    // Extended model initialization removed - unified approach handles taxonomy
+    
+    // Extended EM will be used for taxonomic groups if present
+    
+    // Use unified functions for all models (extended functions removed)
+    switch (method) {
+        case METHOD_A:  calcQ_func = sparse_calcQ_method_A; break;
+        case METHOD_AE: calcQ_func = sparse_calcQ_method_AE; break;
+        case METHOD_B:  calcQ_func = sparse_calcQ_method_B; break;
+        case METHOD_BE: calcQ_func = sparse_calcQ_method_BE; break;
+        case METHOD_BEFULL: calcQ_func = sparse_calcQ_method_BEfull; break;
+        case METHOD_C:  calcQ_func = sparse_calcQ_method_C; break;
+        case METHOD_CE: calcQ_func = sparse_calcQ_method_CE; break;
+        case METHOD_CED: calcQ_func = sparse_calcQ_method_CED; break;
+        case METHOD_CEFULL: calcQ_func = sparse_calcQ_method_CEfull; break;
+        case METHOD_CEDFULL:
+            // Use simple version when taxonomic groups are present
+            if (sparse_em_data->n_taxonomic_groups > 0) {
+                calcQ_func = sparse_calcQ_method_CEDfull_simple;
+            } else {
+                calcQ_func = sparse_calcQ_method_CEDfull;
+            }
+            break;
+        default: 
+            fprintf(stderr, "Error: Method %d not supported in sparse EM\n", method);
+            return 0;
+    }
+    
+    // Extended SQUAREM disable logic removed - unified approach supports SQUAREM
+    
+    
+    if (use_squarem && min_proportion > 0.0) {
+        // Two-phase optimization: Standard EM with pruning first, then SQUAREM without pruning
+        printf("Two-phase optimization: Standard EM (first 500 iterations with pruning) + SQUAREM (remaining iterations without pruning)\n");
+        
+        // Phase 1: Standard EM with pruning for first 500 iterations
+        printf("Phase 1: Standard EM with pruning (500 iterations)...\n");
+        fflush(stdout);
+        
+        int phase1_iterations = 5;
+        for (int iter = 0; iter < phase1_iterations; iter++) {
+            sparse_em_data->prev_log_likelihood = sparse_em_data->log_likelihood;
+            
+            calcQ_func(sparse_em_data);
+            sparse_em_e_step(sparse_em_data);
+            sparse_em_m_step(sparse_em_data, method);
+            
+            // Debug: Override parameters after M-step, before likelihood calculation
+            if (likelihood_ratio_test_mode) {
+                load_test_parameters_and_setup(sparse_em_data);
+                
+                // Recalculate Q matrix with test parameters (genome removed and renormalized)
+                calcQ_func(sparse_em_data);
+            } else if (debug_likelihood_mode) {
+                load_debug_parameters(sparse_em_data);
+                
+                // TEST HYPOTHESIS: Compare unified vs separate array values
+                printf("DEBUG ARRAY TEST: Separate arrays after loading:\n");
+                printf("  proportions[0]=%.6f, proportions[1]=%.6f, proportions[2]=%.6f, proportions[3]=%.6f\n",
+                       sparse_em_data->proportions[0], sparse_em_data->proportions[1], 
+                       sparse_em_data->proportions[2], sparse_em_data->proportions[3]);
+                printf("  taxonomic_proportions[0]=%.6f, taxonomic_proportions[1]=%.6f, taxonomic_proportions[2]=%.6f, taxonomic_proportions[3]=%.6f\n",
+                       sparse_em_data->taxonomic_proportions[0], sparse_em_data->taxonomic_proportions[1],
+                       sparse_em_data->taxonomic_proportions[2], sparse_em_data->taxonomic_proportions[3]);
+                
+                if (sparse_em_data->unified_proportions) {
+                    printf("DEBUG ARRAY TEST: Unified arrays:\n");
+                    printf("  unified_proportions[0]=%.6f, unified_proportions[1]=%.6f, unified_proportions[2]=%.6f, unified_proportions[3]=%.6f\n",
+                           sparse_em_data->unified_proportions[0], sparse_em_data->unified_proportions[1],
+                           sparse_em_data->unified_proportions[2], sparse_em_data->unified_proportions[3]);
+                    printf("  unified_proportions[4]=%.6f, unified_proportions[5]=%.6f, unified_proportions[6]=%.6f, unified_proportions[7]=%.6f\n",
+                           sparse_em_data->unified_proportions[4], sparse_em_data->unified_proportions[5],
+                           sparse_em_data->unified_proportions[6], sparse_em_data->unified_proportions[7]);
+                } else {
+                    printf("DEBUG ARRAY TEST: unified_proportions is NULL\n");
+                }
+                
+                // TEST: Synchronize unified arrays with loaded separate array values
+                if (sparse_em_data->unified_proportions) {
+                    printf("DEBUG TEST: Synchronizing unified arrays with loaded values\n");
+                    for (int j = 0; j < sparse_em_data->n_genomes; j++) {
+                        sparse_em_data->unified_proportions[j] = sparse_em_data->proportions[j];
+                    }
+                    for (int t = 0; t < sparse_em_data->n_taxonomic_groups; t++) {
+                        sparse_em_data->unified_proportions[sparse_em_data->n_genomes + t] = sparse_em_data->taxonomic_proportions[t];
+                    }
+                    
+                    // Verify synchronization worked
+                    printf("DEBUG TEST: Unified arrays after sync:\n");
+                    printf("  unified_proportions[0]=%.6f, unified_proportions[1]=%.6f, unified_proportions[2]=%.6f, unified_proportions[3]=%.6f\n",
+                           sparse_em_data->unified_proportions[0], sparse_em_data->unified_proportions[1],
+                           sparse_em_data->unified_proportions[2], sparse_em_data->unified_proportions[3]);
+                    printf("  unified_proportions[4]=%.6f, unified_proportions[5]=%.6f, unified_proportions[6]=%.6f, unified_proportions[7]=%.6f\n",
+                           sparse_em_data->unified_proportions[4], sparse_em_data->unified_proportions[5],
+                           sparse_em_data->unified_proportions[6], sparse_em_data->unified_proportions[7]);
+                }
+                
+        // DEBUG printf arguments removed
+                calcQ_func(sparse_em_data);  // Recalculate Q matrix with debug parameters
+            }
+            
+            sparse_em_data->log_likelihood = sparse_calculate_log_likelihood(sparse_em_data);
+            
+            // Print parameters in final iteration (23) for normal mode OR in debug mode
+            // DEBUG output block removed
+            
+            // Debug: Print likelihood and exit after first calculation
+            if (debug_likelihood_mode) {
+                printf("DEBUG LIKELIHOOD: %.6f\n", sparse_em_data->log_likelihood);
+                exit(0);
+            }
+            
+            // Likelihood ratio test: Just continue with EM optimization
+            // (L_0 calculation and ratio will be done after EM completes)
+            
+            
+            if (verbose || iter < 5 || (iter + 1) % 5 == 0) {
+                printf("  Phase 1 iteration %d: log-likelihood = %.6f\n", iter + 1, sparse_em_data->log_likelihood);
+                fflush(stdout);
+            }
+            
+            // Prune genomes at appropriate iterations AFTER EM step
+            if (should_prune_at_iteration(iter + 1)) {
+                sparse_prune_genomes_and_reads(sparse_em_data, min_proportion);
+                
+                // CRITICAL: Recalculate everything after pruning to maintain likelihood monotonicity
+                calcQ_func(sparse_em_data);
+                sparse_em_e_step(sparse_em_data);
+                sparse_em_data->log_likelihood = sparse_calculate_log_likelihood(sparse_em_data);
+                
+                printf("  After pruning: log-likelihood = %.6f\n", sparse_em_data->log_likelihood);
+                fflush(stdout);
+            }
+            
+            // Check convergence (simplified for phase 1)
+            if (iter > 0 && fabs(sparse_em_data->log_likelihood - sparse_em_data->prev_log_likelihood) < tolerance) {
+                printf("  Phase 1 converged after %d iterations\n", iter + 1);
+                phase1_iterations = iter + 1;
+                
+                // True convergence achieved - skip Phase 2 entirely
+                printf("Algorithm fully converged in Phase 1. Skipping Phase 2 (SQUAREM).\n");
+                
+                // Restore original min_proportion setting and return results
+                int total_iterations = phase1_iterations;
+                printf("Total optimization: %d iterations (all standard EM)\n", total_iterations);
+                
+                // Print likelihood ratio test results if in test mode
+                print_likelihood_ratio_and_exit(sparse_em_data);
+                
+                return total_iterations;
+            }
+        }
+        
+        printf("Phase 1 completed after %d iterations. Active genomes: %d/%d\n",
+               phase1_iterations, sparse_count_active_genomes(sparse_em_data), sparse_em_data->n_genomes);
+
+        // Phase 2: SQUAREM without pruning
+        printf("Phase 2: SQUAREM acceleration without pruning...\n");
+        fflush(stdout);
+        
+        // Temporarily disable pruning for SQUAREM
+        double orig_min_proportion = sparse_em_data->min_proportion;
+        sparse_em_data->min_proportion = 0.0;  // Disable pruning
+        
+        // Continue with SQUAREM for remaining iterations
+        int remaining_iterations = max_iterations - phase1_iterations;
+        int squarem_iterations = 0;
+        if (remaining_iterations > 0) {
+            // Setup SQUAREM for phase 2
+            void (*fixed_point_func)(double*, double*, void*);
+            double (*objective_func)(double*, void*);
+            
+            switch (method) {
+                case METHOD_A:  
+                    fixed_point_func = sparse_fixed_point_A; 
+                    objective_func = sparse_objective_A; 
+                    break;
+                case METHOD_AE: 
+                    fixed_point_func = sparse_fixed_point_AE; 
+                    objective_func = sparse_objective_AE; 
+                    break;
+                case METHOD_B:  
+                    fixed_point_func = sparse_fixed_point_B; 
+                    objective_func = sparse_objective_B; 
+                    break;
+                case METHOD_BE: 
+                    fixed_point_func = sparse_fixed_point_BE; 
+                    objective_func = sparse_objective_BE; 
+                    break;
+                case METHOD_BEFULL:
+                    fixed_point_func = sparse_fixed_point_BEfull;
+                    objective_func = sparse_objective_BEfull;
+                    break;
+                case METHOD_C:
+                    fixed_point_func = sparse_fixed_point_C;
+                    objective_func = sparse_objective_C;
+                    break;
+                case METHOD_CE:
+                    fixed_point_func = sparse_fixed_point_CE;
+                    objective_func = sparse_objective_CE;
+                    break;
+                case METHOD_CED:
+                    fixed_point_func = sparse_fixed_point_CED;
+                    objective_func = sparse_objective_CED;
+                    break;
+                case METHOD_CEFULL:
+                    fixed_point_func = sparse_fixed_point_CEfull;
+                    objective_func = sparse_objective_CEfull;
+                    break;
+                case METHOD_CEDFULL:
+                    fixed_point_func = sparse_fixed_point_CEDfull;
+                    objective_func = sparse_objective_CEDfull;
+                    break;
+                default: 
+                    sparse_em_data->min_proportion = orig_min_proportion;
+                    return 0;
+            }
+            
+            // Use direct SQUAREM approach - same as working single-phase path
+            printf("  Phase 2: Using direct SQUAREM (same as single-phase approach)\n");
+            printf("  Operating on full parameter space with flag-based pruning\n");
+            printf("  Active genomes after Phase 1 pruning: %d/%d\n", 
+                   sparse_count_active_genomes(sparse_em_data), sparse_em_data->n_genomes);
+            
+            // Set up parameter vector - identical to direct SQUAREM path
+            int param_size = sparse_em_data->n_genomes - 1;  // Base proportions
+            if (method == METHOD_AE || method == METHOD_BE || method == METHOD_CE) {
+                param_size = sparse_em_data->n_genomes;  // Add error rate
+            } else if (method == METHOD_CED) {
+                param_size = sparse_em_data->n_genomes + 1;  // Add error and damage rates
+            } else if (method == METHOD_BEFULL || method == METHOD_CEFULL) {
+                param_size = 2 * sparse_em_data->n_genomes - 1;  // K-1 proportions + K error rates
+            } else if (method == METHOD_CEDFULL) {
+                if (sparse_em_data->n_taxonomic_groups > 0) {
+                    // Unified proportions + error rates + damage rates (mode-dependent)
+                    int n_unified_props = sparse_em_data->n_total_entities - 1;
+                    int total_entities = sparse_em_data->n_total_entities;
+                    if (sparse_em_data->joint_damage_rate == 1) {
+                        // JOINT mode: proportions + error_rates + 1 shared damage rate
+                        param_size = n_unified_props + total_entities + 1;
+                    } else {
+                        // SEPARATE mode: proportions + error_rates + damage_rates
+                        param_size = n_unified_props + 2 * total_entities;
+                    }
+                } else {
+                    // Genome-only: (K - 1) proportions + K error rates + damage rates (mode-dependent)
+                    if (sparse_em_data->joint_damage_rate == 1) {
+                        // JOINT mode: (K - 1) + K + 1 = 2K
+                        param_size = 2 * sparse_em_data->n_genomes;
+                    } else {
+                        // SEPARATE mode: (K - 1) + K + K = 3K - 1
+                        param_size = 3 * sparse_em_data->n_genomes - 1;
+                    }
+                }
+            }
+            
+            double *x = malloc(param_size * sizeof(double));
+            if (!x) {
+                sparse_em_data->min_proportion = orig_min_proportion;
+                return 0;
+            }
+            
+            // Copy parameters to vector - identical to direct SQUAREM approach
+            sparse_copy_parameters(sparse_em_data, x, NULL);
+            
+            // For methods with additional parameters - copy from direct SQUAREM setup
+            if (method == METHOD_CE) {
+                x[sparse_em_data->n_genomes - 1] = sparse_em_data->error_rate;
+            } else if (method == METHOD_CED) {
+                x[sparse_em_data->n_genomes - 1] = sparse_em_data->error_rate;
+                x[sparse_em_data->n_genomes] = sparse_em_data->damage_rate;
+            } else if (method == METHOD_BEFULL || method == METHOD_CEFULL) {
+                // Pack per-genome error rates
+                for (int j = 0; j < sparse_em_data->n_genomes; j++) {
+                    x[sparse_em_data->n_genomes - 1 + j] = sparse_em_data->error_rates[j];
+                }
+            } else if (method == METHOD_CEDFULL) {
+                if (sparse_em_data->n_taxonomic_groups > 0) {
+                    // CEDfull with taxonomy - copy unified parameter packing logic
+                    double genome_sum = 0.0;
+                    for (int j = 0; j < sparse_em_data->n_genomes; j++) {
+                        sparse_em_data->unified_proportions[j] = sparse_em_data->proportions[j];
+                        genome_sum += sparse_em_data->proportions[j];
+                    }
+                    
+                    double tax_sum = 0.0;
+                    for (int t = 0; t < sparse_em_data->n_taxonomic_groups; t++) {
+                        sparse_em_data->unified_proportions[sparse_em_data->n_genomes + t] = sparse_em_data->taxonomic_proportions[t];
+                        tax_sum += sparse_em_data->taxonomic_proportions[t];
+                    }
+                    
+                    // Copy unified proportions to start of parameter vector (excluding last one)
+                    int n_unified_props = sparse_em_data->n_total_entities - 1;
+                    for (int i = 0; i < n_unified_props; i++) {
+                        x[i] = sparse_em_data->unified_proportions[i];
+                    }
+                    
+                    // Pack per-entity error and damage rates after unified proportions
+                    int rate_offset = n_unified_props;
+                    int total_entities = sparse_em_data->n_total_entities;
+
+                    // Pack error rates
+                    for (int j = 0; j < total_entities; j++) {
+                        x[rate_offset + j] = sparse_em_data->error_rates[j];
+                    }
+
+                    // Pack damage rates (mode-dependent)
+                    if (sparse_em_data->joint_damage_rate == 1) {
+                        // JOINT mode: pack single shared damage rate
+                        x[rate_offset + total_entities] = sparse_em_data->shared_damage_rate;
+                    } else {
+                        // SEPARATE mode: pack all damage rates
+                        for (int j = 0; j < total_entities; j++) {
+                            x[rate_offset + total_entities + j] = sparse_em_data->damage_rates[j];
+                        }
+                    }
+                } else {
+                    // Original CEDfull without taxonomy
+                    // Pack error rates
+                    for (int j = 0; j < sparse_em_data->n_genomes; j++) {
+                        x[sparse_em_data->n_genomes - 1 + j] = sparse_em_data->error_rates[j];
+                    }
+
+                    // Pack damage rates (mode-dependent)
+                    if (sparse_em_data->joint_damage_rate == 1) {
+                        // JOINT mode: pack single shared damage rate at position 2K-1
+                        x[2 * sparse_em_data->n_genomes - 1] = sparse_em_data->shared_damage_rate;
+                    } else {
+                        // SEPARATE mode: pack all K damage rates starting at position 2K-1
+                        for (int j = 0; j < sparse_em_data->n_genomes; j++) {
+                            x[2 * sparse_em_data->n_genomes - 1 + j] = sparse_em_data->damage_rates[j];
+                        }
+                    }
+                }
+            }
+            
+            // Create SQUAREM control structure for phase 2
+            squarem_control_t *control = squarem_control_create();
+            if (!control) {
+                free(x);
+                sparse_em_data->min_proportion = orig_min_proportion;
+                return 0;
+            }
+            
+            control->maxiter = remaining_iterations;
+            control->tol = tolerance;
+            control->trace = verbose;
+            
+            // Run SQUAREM - identical to direct SQUAREM path
+            squarem_result_t *result = sparse_squarem_wrapper(x, param_size, fixed_point_func, 
+                                                              objective_func, sparse_em_data, control);
+            
+            squarem_iterations = 0;
+            if (result) {
+                squarem_iterations = result->iter;
+                
+                // Copy results back - identical to direct SQUAREM approach
+                if (!(method == METHOD_CEDFULL && sparse_em_data->n_taxonomic_groups > 0)) {
+                    for (int i = 0; i < sparse_em_data->n_genomes - 1; i++) {
+                        sparse_em_data->proportions[i] = result->par[i];
+                    }
+                    
+                    // Calculate last proportion to ensure sum to 1
+                    double sum = 0.0;
+                    for (int i = 0; i < sparse_em_data->n_genomes - 1; i++) {
+                        sum += sparse_em_data->proportions[i];
+                    }
+                    sparse_em_data->proportions[sparse_em_data->n_genomes - 1] = 1.0 - sum;
+                }
+                
+                if (method == METHOD_AE || method == METHOD_BE) {
+                    sparse_em_data->error_rate = result->par[sparse_em_data->n_genomes - 1];
+                } else if (method == METHOD_CE) {
+                    sparse_em_data->error_rate = result->par[sparse_em_data->n_genomes - 1];
+                } else if (method == METHOD_CED) {
+                    sparse_em_data->error_rate = result->par[sparse_em_data->n_genomes - 1];
+                    sparse_em_data->damage_rate = result->par[sparse_em_data->n_genomes];
+                } else if (method == METHOD_BEFULL || method == METHOD_CEFULL) {
+                    // Unpack per-genome error rates
+                    for (int j = 0; j < sparse_em_data->n_genomes; j++) {
+                        sparse_em_data->error_rates[j] = result->par[sparse_em_data->n_genomes - 1 + j];
+                    }
+                } else if (method == METHOD_CEDFULL) {
+                    if (sparse_em_data->n_taxonomic_groups > 0) {
+                        // CEDfull+taxonomy unpacking logic
+                        int n_unified_props = sparse_em_data->n_total_entities - 1;
+                        
+                        // Unpack unified proportions (excluding last one)
+                        for (int i = 0; i < n_unified_props; i++) {
+                            sparse_em_data->unified_proportions[i] = result->par[i];
+                        }
+                        
+                        // Calculate last unified proportion
+                        double sum = 0.0;
+                        for (int i = 0; i < n_unified_props; i++) {
+                            sum += sparse_em_data->unified_proportions[i];
+                        }
+                        sparse_em_data->unified_proportions[n_unified_props] = 1.0 - sum;
+                        
+                        // Copy from unified array to separate arrays
+                        for (int j = 0; j < sparse_em_data->n_genomes; j++) {
+                            sparse_em_data->proportions[j] = sparse_em_data->unified_proportions[j];
+                        }
+                        for (int t = 0; t < sparse_em_data->n_taxonomic_groups; t++) {
+                            sparse_em_data->taxonomic_proportions[t] = sparse_em_data->unified_proportions[sparse_em_data->n_genomes + t];
+                        }
+                        
+                        // Unpack error and damage rates for all entities
+                        int rate_offset = n_unified_props;
+                        int total_entities = sparse_em_data->n_total_entities;
+
+                        // Unpack error rates
+                        for (int j = 0; j < total_entities; j++) {
+                            sparse_em_data->error_rates[j] = result->par[rate_offset + j];
+                        }
+
+                        // Unpack damage rates (mode-dependent)
+                        if (sparse_em_data->joint_damage_rate == 1) {
+                            // JOINT mode: unpack shared damage rate and broadcast
+                            sparse_em_data->shared_damage_rate = result->par[rate_offset + total_entities];
+                            for (int j = 0; j < total_entities; j++) {
+                                sparse_em_data->damage_rates[j] = sparse_em_data->shared_damage_rate;
+                            }
+                        } else {
+                            // SEPARATE mode: unpack all damage rates
+                            for (int j = 0; j < total_entities; j++) {
+                                sparse_em_data->damage_rates[j] = result->par[rate_offset + total_entities + j];
+                            }
+                        }
+                    } else {
+                        // Original CEDfull without taxonomy
+                        // Unpack error rates
+                        for (int j = 0; j < sparse_em_data->n_genomes; j++) {
+                            sparse_em_data->error_rates[j] = result->par[sparse_em_data->n_genomes - 1 + j];
+                        }
+
+                        // Unpack damage rates (mode-dependent)
+                        if (sparse_em_data->joint_damage_rate == 1) {
+                            // JOINT mode: unpack shared damage rate and broadcast
+                            sparse_em_data->shared_damage_rate = result->par[2 * sparse_em_data->n_genomes - 1];
+                            for (int j = 0; j < sparse_em_data->n_genomes; j++) {
+                                sparse_em_data->damage_rates[j] = sparse_em_data->shared_damage_rate;
+                            }
+                        } else {
+                            // SEPARATE mode: unpack all damage rates
+                            for (int j = 0; j < sparse_em_data->n_genomes; j++) {
+                                sparse_em_data->damage_rates[j] = result->par[2 * sparse_em_data->n_genomes - 1 + j];
+                            }
+                        }
+                    }
+                }
+                
+                squarem_result_destroy(result);
+            }
+            
+            // Calculate final log-likelihood (this was missing in active parameter approach)
+            sparse_em_data->log_likelihood = sparse_calculate_log_likelihood(sparse_em_data);
+            
+            printf("Phase 2 completed after %d iterations\n", squarem_iterations);
+            printf("Total optimization: %d iterations (%d standard EM + %d SQUAREM)\n", 
+                   phase1_iterations + squarem_iterations, phase1_iterations, squarem_iterations);
+            
+            squarem_control_destroy(control);
+            free(x);
+        } else {
+            printf("Optimization completed in Phase 1\n");
+        }
+        
+        // Restore original pruning setting after SQUAREM
+        sparse_em_data->min_proportion = orig_min_proportion;
+        
+        // Print likelihood ratio test results if in test mode
+        print_likelihood_ratio_and_exit(sparse_em_data);
+        
+        // Return total iterations from two-phase optimization
+        return phase1_iterations + squarem_iterations;
+        
+    } else if (use_squarem) {
+        // Use SQUAREM acceleration (no pruning case, genomes only)
+        if (verbose) printf("Setting up SQUAREM acceleration...\n");
+        
+        void (*fixed_point_func)(double*, double*, void*);
+        double (*objective_func)(double*, void*);
+        
+        switch (method) {
+            case METHOD_A:  
+                fixed_point_func = sparse_fixed_point_A; 
+                objective_func = sparse_objective_A; 
+                break;
+            case METHOD_AE: 
+                fixed_point_func = sparse_fixed_point_AE; 
+                objective_func = sparse_objective_AE; 
+                break;
+            case METHOD_B:  
+                fixed_point_func = sparse_fixed_point_B; 
+                objective_func = sparse_objective_B; 
+                break;
+            case METHOD_BE: 
+                fixed_point_func = sparse_fixed_point_BE; 
+                objective_func = sparse_objective_BE; 
+                break;
+            case METHOD_BEFULL:
+                fixed_point_func = sparse_fixed_point_BEfull;
+                objective_func = sparse_objective_BEfull;
+                break;
+            case METHOD_C:
+                fixed_point_func = sparse_fixed_point_C;
+                objective_func = sparse_objective_C;
+                break;
+            case METHOD_CE:
+                fixed_point_func = sparse_fixed_point_CE;
+                objective_func = sparse_objective_CE;
+                break;
+            case METHOD_CED:
+                fixed_point_func = sparse_fixed_point_CED;
+                objective_func = sparse_objective_CED;
+                break;
+            case METHOD_CEFULL:
+                fixed_point_func = sparse_fixed_point_CEfull;
+                objective_func = sparse_objective_CEfull;
+                break;
+            case METHOD_CEDFULL:
+                fixed_point_func = sparse_fixed_point_CEDfull;
+                objective_func = sparse_objective_CEDfull;
+                break;
+            default: return 0;
+        }
+        
+        // Set up parameter vector
+        int param_size = sparse_em_data->n_genomes - 1;  // Base proportions
+        if (method == METHOD_AE || method == METHOD_BE || method == METHOD_CE) {
+            param_size = sparse_em_data->n_genomes;  // Add error rate
+        } else if (method == METHOD_CED) {
+            param_size = sparse_em_data->n_genomes + 1;  // Add error and damage rates
+        } else if (method == METHOD_BEFULL || method == METHOD_CEFULL) {
+            param_size = 2 * sparse_em_data->n_genomes - 1;  // K-1 proportions + K error rates
+        } else if (method == METHOD_CEDFULL) {
+            if (sparse_em_data->n_taxonomic_groups > 0) {
+                // Unified proportions + error rates + damage rates (mode-dependent)
+                int n_unified_props = sparse_em_data->n_total_entities - 1;
+                int total_entities = sparse_em_data->n_total_entities;
+                if (sparse_em_data->joint_damage_rate == 1) {
+                    // JOINT mode: proportions + error_rates + 1 shared damage rate
+                    param_size = n_unified_props + total_entities + 1;
+                } else {
+                    // SEPARATE mode: proportions + error_rates + damage_rates
+                    param_size = n_unified_props + 2 * total_entities;
+                }
+            } else {
+                // Genome-only: (K - 1) proportions + K error rates + damage rates (mode-dependent)
+                if (sparse_em_data->joint_damage_rate == 1) {
+                    // JOINT mode: (K - 1) + K + 1 = 2K
+                    param_size = 2 * sparse_em_data->n_genomes;
+                } else {
+                    // SEPARATE mode: (K - 1) + K + K = 3K - 1
+                    param_size = 3 * sparse_em_data->n_genomes - 1;
+                }
+            }
+        }
+        double *x = malloc(param_size * sizeof(double));
+        
+        // Copy parameters to vector
+        sparse_copy_parameters(sparse_em_data, x, NULL);
+        
+        // For methods with additional parameters
+        if (method == METHOD_CE) {
+            x[sparse_em_data->n_genomes - 1] = sparse_em_data->error_rate;
+        } else if (method == METHOD_CED) {
+            x[sparse_em_data->n_genomes - 1] = sparse_em_data->error_rate;
+            x[sparse_em_data->n_genomes] = sparse_em_data->damage_rate;
+        } else if (method == METHOD_BEFULL || method == METHOD_CEFULL) {
+            // Pack per-genome error rates
+            for (int j = 0; j < sparse_em_data->n_genomes; j++) {
+                x[sparse_em_data->n_genomes - 1 + j] = sparse_em_data->error_rates[j];
+            }
+        } else if (method == METHOD_CEDFULL) {
+            if (sparse_em_data->n_taxonomic_groups > 0) {
+                // NEW: Pack unified proportions + per-genome error and damage rates
+                // BUGFIX: First synchronize unified_proportions with current state
+                double genome_sum = 0.0;
+                for (int j = 0; j < sparse_em_data->n_genomes; j++) {
+                    sparse_em_data->unified_proportions[j] = sparse_em_data->proportions[j];
+                    genome_sum += sparse_em_data->proportions[j];
+                    // Debug output removed
+                }
+                // Debug output removed
+                
+                double tax_sum = 0.0;
+                for (int t = 0; t < sparse_em_data->n_taxonomic_groups; t++) {
+                    sparse_em_data->unified_proportions[sparse_em_data->n_genomes + t] = sparse_em_data->taxonomic_proportions[t];
+                    tax_sum += sparse_em_data->taxonomic_proportions[t];
+                    // Debug output removed
+                }
+                // Debug output removed
+                
+                // Copy unified proportions to start of parameter vector (excluding last one)
+                int n_unified_props = sparse_em_data->n_total_entities - 1;
+                for (int i = 0; i < n_unified_props; i++) {
+                    x[i] = sparse_em_data->unified_proportions[i];
+                }
+                
+                // Pack per-entity error and damage rates after unified proportions
+                int rate_offset = n_unified_props;
+                int total_entities = sparse_em_data->n_total_entities;
+
+                // Pack error rates
+                for (int j = 0; j < total_entities; j++) {
+                    x[rate_offset + j] = sparse_em_data->error_rates[j];
+                }
+
+                // Pack damage rates (mode-dependent)
+                if (sparse_em_data->joint_damage_rate == 1) {
+                    // JOINT mode: pack single shared damage rate
+                    x[rate_offset + total_entities] = sparse_em_data->shared_damage_rate;
+                } else {
+                    // SEPARATE mode: pack all damage rates
+                    for (int j = 0; j < total_entities; j++) {
+                        x[rate_offset + total_entities + j] = sparse_em_data->damage_rates[j];
+                    }
+                }
+            } else {
+                // ORIGINAL: Pack per-genome error and damage rates
+                // Pack error rates
+                for (int j = 0; j < sparse_em_data->n_genomes; j++) {
+                    x[sparse_em_data->n_genomes - 1 + j] = sparse_em_data->error_rates[j];
+                }
+
+                // Pack damage rates (mode-dependent)
+                if (sparse_em_data->joint_damage_rate == 1) {
+                    // JOINT mode: pack single shared damage rate
+                    x[2 * sparse_em_data->n_genomes - 1] = sparse_em_data->shared_damage_rate;
+                } else {
+                    // SEPARATE mode: pack all damage rates
+                    for (int j = 0; j < sparse_em_data->n_genomes; j++) {
+                        x[2 * sparse_em_data->n_genomes - 1 + j] = sparse_em_data->damage_rates[j];
+                    }
+                }
+            }
+        }
+        
+        // Create SQUAREM control structure
+        squarem_control_t *control = squarem_control_create();
+        if (!control) {
+            free(x);
+            return 0;
+        }
+        
+        control->maxiter = max_iterations;
+        control->tol = tolerance;
+        control->trace = verbose;
+        
+        // Run SQUAREM with sparse-specific wrapper
+        squarem_result_t *result = sparse_squarem_wrapper(x, param_size, fixed_point_func, 
+                                                        objective_func, sparse_em_data, control);
+        
+        int iterations = max_iterations;
+        if (result) {
+            iterations = result->iter;
+            
+            // Copy results back (skip for CEDfull with taxonomy - handled separately)
+            if (!(method == METHOD_CEDFULL && sparse_em_data->n_taxonomic_groups > 0)) {
+                for (int i = 0; i < sparse_em_data->n_genomes - 1; i++) {
+                    sparse_em_data->proportions[i] = result->par[i];
+                }
+                
+                // Calculate last proportion to ensure sum to 1
+                double sum = 0.0;
+                for (int i = 0; i < sparse_em_data->n_genomes - 1; i++) {
+                    sum += sparse_em_data->proportions[i];
+                }
+                sparse_em_data->proportions[sparse_em_data->n_genomes - 1] = 1.0 - sum;
+            }
+            
+            if (method == METHOD_AE || method == METHOD_BE) {
+                sparse_em_data->error_rate = result->par[sparse_em_data->n_genomes - 1];
+            } else if (method == METHOD_CE) {
+                sparse_em_data->error_rate = result->par[sparse_em_data->n_genomes - 1];
+            } else if (method == METHOD_CED) {
+                sparse_em_data->error_rate = result->par[sparse_em_data->n_genomes - 1];
+                sparse_em_data->damage_rate = result->par[sparse_em_data->n_genomes];
+            } else if (method == METHOD_BEFULL || method == METHOD_CEFULL) {
+                // Unpack per-genome error rates
+                for (int j = 0; j < sparse_em_data->n_genomes; j++) {
+                    sparse_em_data->error_rates[j] = result->par[sparse_em_data->n_genomes - 1 + j];
+                }
+            } else if (method == METHOD_CEDFULL) {
+                if (sparse_em_data->n_taxonomic_groups > 0) {
+                    // NEW: Unpack unified proportions + per-genome error and damage rates
+                    int n_unified_props = sparse_em_data->n_total_entities - 1;
+
+                    // Unpack unified proportions (excluding last one)
+                    for (int i = 0; i < n_unified_props; i++) {
+                        sparse_em_data->unified_proportions[i] = result->par[i];
+                    }
+
+                    // Calculate last unified proportion
+                    double sum = 0.0;
+                    for (int i = 0; i < n_unified_props; i++) {
+                        sum += sparse_em_data->unified_proportions[i];
+                    }
+                    sparse_em_data->unified_proportions[n_unified_props] = 1.0 - sum;
+
+                    // BUGFIX: Clamp negative proportions that can arise from M-step with α < 1
+                    // The M-step with Dirichlet prior α < 1 can produce negative proportions
+                    double epsilon = 1e-10;
+                    int n_clamped = 0;
+                    for (int i = 0; i <= n_unified_props; i++) {
+                        if (sparse_em_data->unified_proportions[i] <= 0.0) {
+                            sparse_em_data->unified_proportions[i] = epsilon;
+                            n_clamped++;
+                        }
+                    }
+
+                    // Renormalize if any clamping occurred
+                    if (n_clamped > 0) {
+                        double new_sum = 0.0;
+                        for (int i = 0; i <= n_unified_props; i++) {
+                            new_sum += sparse_em_data->unified_proportions[i];
+                        }
+                        for (int i = 0; i <= n_unified_props; i++) {
+                            sparse_em_data->unified_proportions[i] /= new_sum;
+                        }
+                    }
+
+                    // Copy from unified array to separate arrays
+                    for (int j = 0; j < sparse_em_data->n_genomes; j++) {
+                        sparse_em_data->proportions[j] = sparse_em_data->unified_proportions[j];
+                    }
+                    for (int t = 0; t < sparse_em_data->n_taxonomic_groups; t++) {
+                        sparse_em_data->taxonomic_proportions[t] = sparse_em_data->unified_proportions[sparse_em_data->n_genomes + t];
+                    }
+                    
+                    // Unpack error and damage rates for all entities
+                    int rate_offset = n_unified_props;
+                    int total_entities = sparse_em_data->n_total_entities;
+                    for (int j = 0; j < total_entities; j++) {
+                        sparse_em_data->error_rates[j] = result->par[rate_offset + j];
+                        sparse_em_data->damage_rates[j] = result->par[rate_offset + total_entities + j];
+                    }
+                } else {
+                    // ORIGINAL: Unpack per-genome error and damage rates
+                    for (int j = 0; j < sparse_em_data->n_genomes; j++) {
+                        sparse_em_data->error_rates[j] = result->par[sparse_em_data->n_genomes - 1 + j];
+                        sparse_em_data->damage_rates[j] = result->par[2 * sparse_em_data->n_genomes - 1 + j];
+                    }
+                }
+            }
+            
+            // Calculate final log-likelihood
+            sparse_em_data->log_likelihood = sparse_calculate_log_likelihood(sparse_em_data);
+            
+            squarem_result_destroy(result);
+        }
+        
+        squarem_control_destroy(control);
+        free(x);
+        
+        // Clean up removed reads file
+        if (sparse_em_data->removed_reads_file) {
+            fclose(sparse_em_data->removed_reads_file);
+            sparse_em_data->removed_reads_file = NULL;
+        }
+        
+        // Print likelihood ratio test results if in test mode
+        print_likelihood_ratio_and_exit(sparse_em_data);
+        
+        return iterations;
+        
+    } else {
+        // Standard EM algorithm
+        // Extended model SQUAREM disable logic removed
+        printf("Starting standard EM iterations (max %d)...\n", max_iterations);
+        fflush(stdout);
+        
+        for (int iter = 0; iter < max_iterations; iter++) {
+            sparse_em_data->iteration = iter;
+            
+            // Save previous state
+            memcpy(sparse_em_data->prev_proportions, sparse_em_data->proportions, 
+                   sparse_em_data->n_genomes * sizeof(double));
+            sparse_em_data->prev_error_rate = sparse_em_data->error_rate;
+            sparse_em_data->prev_damage_rate = sparse_em_data->damage_rate;
+            sparse_em_data->prev_log_likelihood = sparse_em_data->log_likelihood;
+            
+            // Save per-genome error rates for BEfull, CEfull, CEDfull
+            if ((method == METHOD_BEFULL || method == METHOD_CEFULL || method == METHOD_CEDFULL) && 
+                sparse_em_data->error_rates && sparse_em_data->prev_error_rates) {
+                memcpy(sparse_em_data->prev_error_rates, sparse_em_data->error_rates,
+                       sparse_em_data->n_genomes * sizeof(double));
+            }
+            
+            // Save per-genome damage rates for CEDfull
+            if (method == METHOD_CEDFULL && sparse_em_data->damage_rates && sparse_em_data->prev_damage_rates) {
+                memcpy(sparse_em_data->prev_damage_rates, sparse_em_data->damage_rates,
+                       sparse_em_data->n_genomes * sizeof(double));
+            }
+            
+            // NEW EM FLOW: 
+            // 1. Calculate likelihood (if iteration = 1: calculate Q function first)
+            if (iter == 0) {
+                // First iteration: calculate Q matrix first  
+                calcQ_func(sparse_em_data);
+            }
+            // DEBUG: Check if proportions sum to 1.0 before likelihood calculation
+            double genome_sum = 0.0, tax_sum = 0.0;
+            for (int j = 0; j < sparse_em_data->n_genomes; j++) {
+                genome_sum += sparse_em_data->proportions[j];
+            }
+            if (sparse_em_data->taxonomic_proportions) {
+                for (int t = 0; t < sparse_em_data->n_taxonomic_groups; t++) {
+                    tax_sum += sparse_em_data->taxonomic_proportions[t];
+                }
+            }
+            // DEBUG printf arguments removed
+            fflush(stdout);
+            
+            sparse_em_data->log_likelihood = sparse_calculate_log_likelihood(sparse_em_data);
+            
+            // 2. Check convergence (if iteration > 1)
+            if (iter > 0) {
+                double delta = fabs(sparse_em_data->log_likelihood - sparse_em_data->prev_log_likelihood);
+                if (delta < tolerance) {
+                    printf("Converged after %d iterations (delta: %.6e)\n", iter + 1, delta);
+                    return iter + 1;
+                }
+            }
+            
+            // 3. Pruning if needed
+            if (min_proportion > 0.0 && should_prune_at_iteration(iter + 1)) {
+                sparse_prune_genomes_and_reads(sparse_em_data, min_proportion);
+            }
+            
+            // 4. Q calculation (with current parameters) - only for iterations 2+
+            if (iter > 0) {
+                fflush(stdout);
+                calcQ_func(sparse_em_data);
+            } else {
+                fflush(stdout);
+            }
+            
+            // 5. E-step (uses fresh Q matrix) 
+            sparse_em_e_step(sparse_em_data);
+            
+            // 6. M-step (updates parameters for next iteration)
+            sparse_em_m_step(sparse_em_data, method);
+            
+            // 7. Recalculate Q matrix with updated parameters (for next iteration's likelihood)
+            calcQ_func(sparse_em_data);
+            
+            // Always print progress for first 5 iterations and every 10th iteration
+            if (iter < 5 || (iter + 1) % 10 == 0) {
+                printf("Iteration %d: log-likelihood = %.6f", 
+                       iter + 1, sparse_em_data->log_likelihood);
+                
+                // Show convergence delta and current rates
+                if (iter > 0) {
+                    double delta = fabs(sparse_em_data->log_likelihood - sparse_em_data->prev_log_likelihood);
+                    printf(" (delta: %.2e)", delta);
+                }
+                
+                // Show current error rates for A and T5
+                // Extended taxonomic error rate debug removed
+                printf("\n");
+                fflush(stdout);
+            }
+            
+            if (verbose) {
+                printf("  [Verbose] Iteration %d: log-likelihood = %.6f", 
+                       iter + 1, sparse_em_data->log_likelihood);
+                
+                // For BEfull, also print error rates
+                if (method == METHOD_BEFULL && sparse_em_data->error_rates) {
+                    printf(" | Error rates:");
+                    for (int j = 0; j < sparse_em_data->n_genomes; j++) {
+                        printf(" %.6f", sparse_em_data->error_rates[j]);
+                    }
+                }
+                printf("\n");
+            }
+            
+            // Check convergence based on method (matching dense implementation)
+            int converged = 0;
+            switch(method) {
+                case METHOD_A:
+                case METHOD_B:
+                case METHOD_C:
+                case METHOD_BEFULL:
+                case METHOD_CEFULL:
+                case METHOD_CEDFULL:
+                    // Only check proportions
+                    converged = sparse_check_convergence(sparse_em_data, tolerance);
+                    break;
+                case METHOD_AE:
+                case METHOD_BE:
+                case METHOD_CE:
+                    // Check proportions and error rate
+                    converged = sparse_check_convergence_with_rate(sparse_em_data, tolerance);
+                    break;
+                case METHOD_CED:
+                    // Check proportions, error rate, and damage rate
+                    converged = sparse_check_convergence_damage_model(sparse_em_data, tolerance);
+                    break;
+                default:
+                    converged = sparse_check_convergence(sparse_em_data, tolerance);
+                    break;
+            }
+            
+            if (converged) {
+                // Ensure final log-likelihood is up to date
+                sparse_em_data->log_likelihood = sparse_calculate_log_likelihood(sparse_em_data);
+                if (verbose) {
+                    printf("Converged after %d iterations\n", iter + 1);
+                    printf("Final log-likelihood: %.6f\n", sparse_em_data->log_likelihood);
+                }
+                
+                // Clean up removed reads file
+                if (sparse_em_data->removed_reads_file) {
+                    fclose(sparse_em_data->removed_reads_file);
+                    sparse_em_data->removed_reads_file = NULL;
+                }
+                
+                // Print likelihood ratio test results if in test mode
+                print_likelihood_ratio_and_exit(sparse_em_data);
+                
+                // Extended model test optimization removed
+                
+                return iter + 1;
+            }
+        }
+        
+        // Calculate final log-likelihood after last iteration
+        sparse_em_data->log_likelihood = sparse_calculate_log_likelihood(sparse_em_data);
+        
+        if (verbose) {
+            printf("Warning: Did not converge after %d iterations\n", max_iterations);
+            printf("Final log-likelihood: %.6f\n", sparse_em_data->log_likelihood);
+        }
+        
+        // Clean up removed reads file
+        if (sparse_em_data->removed_reads_file) {
+            fclose(sparse_em_data->removed_reads_file);
+            sparse_em_data->removed_reads_file = NULL;
+        }
+        
+        // Print likelihood ratio test results if in test mode
+        print_likelihood_ratio_and_exit(sparse_em_data);
+        
+        // Extended model test optimization removed
+        
+        return max_iterations;
+    }
+}
+
+// Sparse fixed-point function for Method A
+void sparse_fixed_point_A(double *x, double *fx, void *params) {
+    sparse_em_data_t *sparse_em_data = (sparse_em_data_t*)params;
+    
+    // Copy parameters from x and calculate sum
+    double sum = 0.0;
+    for (int i = 0; i < sparse_em_data->n_genomes - 1; i++) {
+        sparse_em_data->proportions[i] = x[i];
+        sum += x[i];
+    }
+    sparse_em_data->proportions[sparse_em_data->n_genomes - 1] = 
+        1.0 - sum;
+    
+    // Debug: Check for invalid proportions
+    static int debug_count = 0;
+    if (debug_count < 5) {
+        //for (int i = 0; i < sparse_em_data->n_genomes - 1; i++) {
+        //    printf(" %.6f", x[i]);
+        //}
+        //printf(" sum=%.6f last_prop=%.6f\n", sum, 1.0 - sum);
+        debug_count++;
+    }
+    
+    // Normalize proportions to ensure they sum to 1 and are non-negative
+    sparse_normalize_proportions(sparse_em_data->proportions, sparse_em_data->n_genomes);
+    
+    // One EM step
+    sparse_calcQ_method_A(sparse_em_data);
+    sparse_em_e_step(sparse_em_data);
+    sparse_em_m_step(sparse_em_data, METHOD_A);
+    
+    // Copy results to fx
+    for (int i = 0; i < sparse_em_data->n_genomes - 1; i++) {
+        fx[i] = sparse_em_data->proportions[i];
+    }
+}
+
+// Sparse objective function for Method A
+double sparse_objective_A(double *x, void *params) {
+    sparse_em_data_t *sparse_em_data = (sparse_em_data_t*)params;
+    
+    // Bounds check for proportions
+    double sum = 0.0;
+    for (int i = 0; i < sparse_em_data->n_genomes - 1; i++) {
+        if (x[i] < 0.0 || x[i] > 1.0) return 1e10;
+        sum += x[i];
+    }
+    double last_prop = 1.0 - sum;
+    if (last_prop < 0.0 || last_prop > 1.0) return 1e10;
+    
+    // Copy valid parameters
+    for (int i = 0; i < sparse_em_data->n_genomes - 1; i++) {
+        sparse_em_data->proportions[i] = x[i];
+    }
+    sparse_em_data->proportions[sparse_em_data->n_genomes - 1] = last_prop;
+    
+    // Removed: sparse_normalize_proportions - parameters already valid
+    
+    sparse_calcQ_method_A(sparse_em_data);
+    return -sparse_calculate_log_likelihood(sparse_em_data);
+}
+
+// Similar implementations for other methods...
+void sparse_fixed_point_AE(double *x, double *fx, void *params) {
+    sparse_em_data_t *sparse_em_data = (sparse_em_data_t*)params;
+    
+    double sum = 0.0;
+    for (int i = 0; i < sparse_em_data->n_genomes - 1; i++) {
+        sparse_em_data->proportions[i] = x[i];
+        sum += x[i];
+    }
+    sparse_em_data->proportions[sparse_em_data->n_genomes - 1] = 
+        1.0 - sum;
+    sparse_em_data->error_rate = x[sparse_em_data->n_genomes - 1];
+    
+    sparse_normalize_proportions(sparse_em_data->proportions, sparse_em_data->n_genomes);
+    
+    sparse_calcQ_method_AE(sparse_em_data);
+    sparse_em_e_step(sparse_em_data);
+    sparse_em_m_step(sparse_em_data, METHOD_AE);
+    
+    for (int i = 0; i < sparse_em_data->n_genomes - 1; i++) {
+        fx[i] = sparse_em_data->proportions[i];
+    }
+    fx[sparse_em_data->n_genomes - 1] = sparse_em_data->error_rate;
+}
+
+double sparse_objective_AE(double *x, void *params) {
+    sparse_em_data_t *sparse_em_data = (sparse_em_data_t*)params;
+    
+    // Bounds check
+    double sum = 0.0;
+    for (int i = 0; i < sparse_em_data->n_genomes - 1; i++) {
+        if (x[i] < 0.0 || x[i] > 1.0) return 1e10;
+        sum += x[i];
+    }
+    double last_prop = 1.0 - sum;
+    if (last_prop < 0.0 || last_prop > 1.0) return 1e10;
+    
+    double error_rate = x[sparse_em_data->n_genomes - 1];
+    if (error_rate < 0.0 || error_rate > 1.0) return 1e10;
+    
+    // Copy valid parameters
+    for (int i = 0; i < sparse_em_data->n_genomes - 1; i++) {
+        sparse_em_data->proportions[i] = x[i];
+    }
+    sparse_em_data->proportions[sparse_em_data->n_genomes - 1] = last_prop;
+    sparse_em_data->error_rate = error_rate;
+    
+    // Removed: sparse_normalize_proportions - parameters already valid
+    
+    sparse_calcQ_method_AE(sparse_em_data);
+    return -sparse_calculate_log_likelihood(sparse_em_data);
+}
+
+void sparse_fixed_point_B(double *x, double *fx, void *params) {
+    sparse_em_data_t *sparse_em_data = (sparse_em_data_t*)params;
+    
+    double sum = 0.0;
+    for (int i = 0; i < sparse_em_data->n_genomes - 1; i++) {
+        sparse_em_data->proportions[i] = x[i];
+        sum += x[i];
+    }
+    sparse_em_data->proportions[sparse_em_data->n_genomes - 1] = 
+        1.0 - sum;
+    
+    sparse_normalize_proportions(sparse_em_data->proportions, sparse_em_data->n_genomes);
+    
+    sparse_calcQ_method_B(sparse_em_data);
+    sparse_em_e_step(sparse_em_data);
+    sparse_em_m_step(sparse_em_data, METHOD_B);
+    
+    for (int i = 0; i < sparse_em_data->n_genomes - 1; i++) {
+        fx[i] = sparse_em_data->proportions[i];
+    }
+}
+
+double sparse_objective_B(double *x, void *params) {
+    sparse_em_data_t *sparse_em_data = (sparse_em_data_t*)params;
+    
+    // Bounds check for proportions
+    double sum = 0.0;
+    for (int i = 0; i < sparse_em_data->n_genomes - 1; i++) {
+        if (x[i] < 0.0 || x[i] > 1.0) return 1e10;
+        sum += x[i];
+    }
+    double last_prop = 1.0 - sum;
+    if (last_prop < 0.0 || last_prop > 1.0) return 1e10;
+    
+    // Copy valid parameters
+    for (int i = 0; i < sparse_em_data->n_genomes - 1; i++) {
+        sparse_em_data->proportions[i] = x[i];
+    }
+    sparse_em_data->proportions[sparse_em_data->n_genomes - 1] = last_prop;
+    
+    // Removed: sparse_normalize_proportions - parameters already valid
+    
+    sparse_calcQ_method_B(sparse_em_data);
+    return -sparse_calculate_log_likelihood(sparse_em_data);
+}
+
+void sparse_fixed_point_BE(double *x, double *fx, void *params) {
+    sparse_em_data_t *sparse_em_data = (sparse_em_data_t*)params;
+    
+    double sum = 0.0;
+    for (int i = 0; i < sparse_em_data->n_genomes - 1; i++) {
+        sparse_em_data->proportions[i] = x[i];
+        sum += x[i];
+    }
+    sparse_em_data->proportions[sparse_em_data->n_genomes - 1] = 
+        1.0 - sum;
+    sparse_em_data->error_rate = x[sparse_em_data->n_genomes - 1];
+    
+    sparse_normalize_proportions(sparse_em_data->proportions, sparse_em_data->n_genomes);
+    
+    sparse_calcQ_method_BE(sparse_em_data);
+    sparse_em_e_step(sparse_em_data);
+    sparse_em_m_step(sparse_em_data, METHOD_BE);
+    
+    for (int i = 0; i < sparse_em_data->n_genomes - 1; i++) {
+        fx[i] = sparse_em_data->proportions[i];
+    }
+    fx[sparse_em_data->n_genomes - 1] = sparse_em_data->error_rate;
+}
+
+double sparse_objective_BE(double *x, void *params) {
+    sparse_em_data_t *sparse_em_data = (sparse_em_data_t*)params;
+    
+    // Bounds check
+    double sum = 0.0;
+    for (int i = 0; i < sparse_em_data->n_genomes - 1; i++) {
+        if (x[i] < 0.0 || x[i] > 1.0) return 1e10;
+        sum += x[i];
+    }
+    double last_prop = 1.0 - sum;
+    if (last_prop < 0.0 || last_prop > 1.0) return 1e10;
+    
+    double error_rate = x[sparse_em_data->n_genomes - 1];
+    if (error_rate < 0.0 || error_rate > 1.0) return 1e10;
+    
+    // Copy valid parameters
+    for (int i = 0; i < sparse_em_data->n_genomes - 1; i++) {
+        sparse_em_data->proportions[i] = x[i];
+    }
+    sparse_em_data->proportions[sparse_em_data->n_genomes - 1] = last_prop;
+    sparse_em_data->error_rate = error_rate;
+    
+    // Removed: sparse_normalize_proportions - parameters already valid
+    
+    sparse_calcQ_method_BE(sparse_em_data);
+    return -sparse_calculate_log_likelihood(sparse_em_data);
+}
+
+// Fixed point function for BEfull (per-genome error rates)
+void sparse_fixed_point_BEfull(double *x, double *fx, void *params) {
+    sparse_em_data_t *sparse_em_data = (sparse_em_data_t*)params;
+    
+    // Unpack parameters: first K-1 proportions, then K error rates
+    double sum = 0.0;
+    for (int i = 0; i < sparse_em_data->n_genomes - 1; i++) {
+        sparse_em_data->proportions[i] = x[i];
+        sum += x[i];
+    }
+    sparse_em_data->proportions[sparse_em_data->n_genomes - 1] = 1.0 - sum;
+    
+    // Unpack error rates
+    for (int j = 0; j < sparse_em_data->n_genomes; j++) {
+        sparse_em_data->error_rates[j] = x[sparse_em_data->n_genomes - 1 + j];
+    }
+    
+    // Use active-aware normalization and bound rates
+    sparse_normalize_proportions_active(sparse_em_data->proportions, sparse_em_data->n_genomes,
+                                        sparse_em_data->active_genomes);
+    
+    // Bound error rates to [0,1]
+    for (int j = 0; j < sparse_em_data->n_genomes; j++) {
+        if (!sparse_em_data->active_genomes || sparse_em_data->active_genomes[j]) {
+            if (sparse_em_data->error_rates[j] < 0.0) sparse_em_data->error_rates[j] = 0.0;
+            if (sparse_em_data->error_rates[j] > 1.0) sparse_em_data->error_rates[j] = 1.0;
+        }
+    }
+    
+    // Run one iteration of EM
+    sparse_calcQ_method_BEfull(sparse_em_data);
+    sparse_em_e_step(sparse_em_data);
+    sparse_em_m_step(sparse_em_data, METHOD_BEFULL);
+    
+    // Pack results
+    for (int i = 0; i < sparse_em_data->n_genomes - 1; i++) {
+        fx[i] = sparse_em_data->proportions[i];
+    }
+    for (int j = 0; j < sparse_em_data->n_genomes; j++) {
+        fx[sparse_em_data->n_genomes - 1 + j] = sparse_em_data->error_rates[j];
+    }
+}
+
+double sparse_objective_BEfull(double *x, void *params) {
+    sparse_em_data_t *sparse_em_data = (sparse_em_data_t*)params;
+    
+    // Unpack parameters (don't reject invalid ones, normalize them instead)
+    double sum = 0.0;
+    for (int i = 0; i < sparse_em_data->n_genomes - 1; i++) {
+        sparse_em_data->proportions[i] = x[i];
+        sum += x[i];
+    }
+    sparse_em_data->proportions[sparse_em_data->n_genomes - 1] = 1.0 - sum;
+    
+    for (int j = 0; j < sparse_em_data->n_genomes; j++) {
+        sparse_em_data->error_rates[j] = x[sparse_em_data->n_genomes - 1 + j];
+    }
+    
+    // Normalize proportions and bound rates for Phase 2 with pruning
+    sparse_normalize_proportions_active(sparse_em_data->proportions, sparse_em_data->n_genomes,
+                                        sparse_em_data->active_genomes);
+    
+    // Bound error rates to [0,1]
+    for (int j = 0; j < sparse_em_data->n_genomes; j++) {
+        if (!sparse_em_data->active_genomes || sparse_em_data->active_genomes[j]) {
+            if (sparse_em_data->error_rates[j] < 0.0) sparse_em_data->error_rates[j] = 0.0;
+            if (sparse_em_data->error_rates[j] > 1.0) sparse_em_data->error_rates[j] = 1.0;
+        }
+    }
+    
+    sparse_calcQ_method_BEfull(sparse_em_data);
+    return -sparse_calculate_log_likelihood(sparse_em_data);
+}
+
+// Utility functions
+// BUGFIX ATTEMPT: Add version that respects active genomes
+// Original version preserved for comparison
+// Safety check function for detecting taxonomic normalization violations
+void check_taxonomic_normalization_violation(sparse_em_data_t *sparse_em_data, const char *function_name) {
+    if (sparse_em_data && sparse_em_data->n_taxonomic_groups > 0) {
+        fprintf(stderr, "FATAL ERROR: Function '%s' called with taxonomic groups present!\n", function_name);
+        fprintf(stderr, "This function only normalizes genome proportions and breaks joint normalization.\n");
+        fprintf(stderr, "Taxonomic groups: %d, genomes: %d\n", 
+                sparse_em_data->n_taxonomic_groups, sparse_em_data->n_genomes);
+        fprintf(stderr, "Use joint normalization instead.\n");
+        fflush(stderr);
+        exit(EXIT_FAILURE);
+    }
+}
+
+void sparse_normalize_proportions_active(double *proportions, int n_genomes, int *active_genomes) {
+    // If we have active genome information, only normalize active ones
+    if (active_genomes) {
+        // First ensure inactive genomes stay at 0
+        for (int i = 0; i < n_genomes; i++) {
+            if (!active_genomes[i]) {
+                proportions[i] = 0.0;
+            } else if (proportions[i] < 0.0) {
+                proportions[i] = 0.0;
+            }
+        }
+        
+        // Calculate sum of active genome proportions only
+        double sum = 0.0;
+        int n_active = 0;
+        for (int i = 0; i < n_genomes; i++) {
+            if (active_genomes[i]) {
+                sum += proportions[i];
+                n_active++;
+            }
+        }
+        
+        // Normalize active genomes to sum to 1
+        if (sum < EM_DOUBLE_MIN && n_active > 0) {
+            // Uniform among active genomes
+            for (int i = 0; i < n_genomes; i++) {
+                proportions[i] = active_genomes[i] ? (1.0 / n_active) : 0.0;
+            }
+        } else if (fabs(sum - 1.0) > 1e-9) {
+            // Normalize active genomes only
+            for (int i = 0; i < n_genomes; i++) {
+                if (active_genomes[i]) {
+                    proportions[i] /= sum;
+                }
+            }
+        }
+    } else {
+        // Original behavior when no active genome info
+        sparse_normalize_proportions(proportions, n_genomes);
+    }
+}
+
+void sparse_normalize_proportions(double *proportions, int n_genomes) {
+    // Ensure all proportions are non-negative
+    int had_negative = 0;
+    for (int i = 0; i < n_genomes; i++) {
+        if (proportions[i] < 0.0) {
+            proportions[i] = 0.0;
+            had_negative = 1;
+        }
+    }
+    
+    // Calculate sum
+    double sum = 0.0;
+    for (int i = 0; i < n_genomes; i++) {
+        sum += proportions[i];
+    }
+    
+    // Debug output
+    static int debug_norm = 0;
+    if (debug_norm < 5 && (sum >= 1.0 || had_negative)) {
+        debug_norm++;
+    }
+    
+    // Normalize to sum to 1
+    if (sum < EM_DOUBLE_MIN) {
+        // Handle degenerate case - uniform distribution
+        for (int i = 0; i < n_genomes; i++) {
+            proportions[i] = 1.0 / n_genomes;
+        }
+    } else if (fabs(sum - 1.0) > 1e-9) {
+        // Only normalize if sum is significantly different from 1
+        for (int i = 0; i < n_genomes; i++) {
+            proportions[i] /= sum;
+        }
+    }
+    // If sum is already very close to 1, do nothing
+}
+
+int sparse_check_convergence(sparse_em_data_t *sparse_em_data, double tolerance) {
+    // This function should be called differently based on the method
+    // For now, it implements the most comprehensive check
+    // The caller should decide what to check based on the method
+    
+    if (sparse_em_data->iteration == 0) return 0;
+    
+    // Check proportions convergence
+    double max_diff = 0.0;
+    for (int i = 0; i < sparse_em_data->n_genomes; i++) {
+        double diff = fabs(sparse_em_data->proportions[i] - sparse_em_data->prev_proportions[i]);
+        if (diff > max_diff) max_diff = diff;
+    }
+    
+    return max_diff < tolerance;
+}
+
+int sparse_check_convergence_with_rate(sparse_em_data_t *sparse_em_data, double tolerance) {
+    if (!sparse_check_convergence(sparse_em_data, tolerance)) return 0;
+    
+    double rate_diff = fabs(sparse_em_data->error_rate - sparse_em_data->prev_error_rate);
+    return (rate_diff < tolerance);
+}
+
+int sparse_check_convergence_damage_model(sparse_em_data_t *sparse_em_data, double tolerance) {
+    if (!sparse_check_convergence(sparse_em_data, tolerance)) return 0;
+    
+    double rate_diff = fabs(sparse_em_data->error_rate - sparse_em_data->prev_error_rate);
+    if (rate_diff >= tolerance) return 0;
+    
+    double damage_diff = fabs(sparse_em_data->damage_rate - sparse_em_data->prev_damage_rate);
+    return (damage_diff < tolerance);
+}
+
+void sparse_copy_parameters(sparse_em_data_t *sparse_em_data, double *proportions, double *error_rate) {
+    for (int i = 0; i < sparse_em_data->n_genomes - 1; i++) {
+        proportions[i] = sparse_em_data->proportions[i];
+    }
+    if (error_rate) {
+        *error_rate = sparse_em_data->error_rate;
+    }
+}
+
+// Sparse fixed-point function for Method C
+void sparse_fixed_point_C(double *x, double *fx, void *params) {
+    sparse_em_data_t *sparse_em_data = (sparse_em_data_t*)params;
+    
+    double sum = 0.0;
+    for (int i = 0; i < sparse_em_data->n_genomes - 1; i++) {
+        sparse_em_data->proportions[i] = x[i];
+        sum += x[i];
+    }
+    sparse_em_data->proportions[sparse_em_data->n_genomes - 1] = 
+        1.0 - sum;
+    
+    sparse_normalize_proportions(sparse_em_data->proportions, sparse_em_data->n_genomes);
+    
+    sparse_calcQ_method_C(sparse_em_data);
+    sparse_em_e_step(sparse_em_data);
+    sparse_em_m_step(sparse_em_data, METHOD_C);
+    
+    for (int i = 0; i < sparse_em_data->n_genomes - 1; i++) {
+        fx[i] = sparse_em_data->proportions[i];
+    }
+}
+
+double sparse_objective_C(double *x, void *params) {
+    sparse_em_data_t *sparse_em_data = (sparse_em_data_t*)params;
+    
+    // Bounds check for proportions
+    double sum = 0.0;
+    for (int i = 0; i < sparse_em_data->n_genomes - 1; i++) {
+        if (x[i] < 0.0 || x[i] > 1.0) return 1e10;
+        sum += x[i];
+    }
+    double last_prop = 1.0 - sum;
+    if (last_prop < 0.0 || last_prop > 1.0) return 1e10;
+    
+    // Copy valid parameters
+    for (int i = 0; i < sparse_em_data->n_genomes - 1; i++) {
+        sparse_em_data->proportions[i] = x[i];
+    }
+    sparse_em_data->proportions[sparse_em_data->n_genomes - 1] = last_prop;
+    
+    // Removed: sparse_normalize_proportions - parameters already valid
+    
+    sparse_calcQ_method_C(sparse_em_data);
+    return -sparse_calculate_log_likelihood(sparse_em_data);
+}
+
+// Sparse fixed-point function for Method CE
+void sparse_fixed_point_CE(double *x, double *fx, void *params) {
+    sparse_em_data_t *sparse_em_data = (sparse_em_data_t*)params;
+    
+    double sum = 0.0;
+    for (int i = 0; i < sparse_em_data->n_genomes - 1; i++) {
+        sparse_em_data->proportions[i] = x[i];
+        sum += x[i];
+    }
+    sparse_em_data->proportions[sparse_em_data->n_genomes - 1] = 
+        1.0 - sum;
+    sparse_em_data->error_rate = x[sparse_em_data->n_genomes - 1];
+    
+    sparse_normalize_proportions(sparse_em_data->proportions, sparse_em_data->n_genomes);
+    
+    sparse_calcQ_method_CE(sparse_em_data);
+    sparse_em_e_step(sparse_em_data);
+    sparse_em_m_step(sparse_em_data, METHOD_CE);
+    
+    for (int i = 0; i < sparse_em_data->n_genomes - 1; i++) {
+        fx[i] = sparse_em_data->proportions[i];
+    }
+    fx[sparse_em_data->n_genomes - 1] = sparse_em_data->error_rate;
+}
+
+double sparse_objective_CE(double *x, void *params) {
+    sparse_em_data_t *sparse_em_data = (sparse_em_data_t*)params;
+    
+    // Bounds check
+    double sum = 0.0;
+    for (int i = 0; i < sparse_em_data->n_genomes - 1; i++) {
+        if (x[i] < 0.0 || x[i] > 1.0) return 1e10;
+        sum += x[i];
+    }
+    double last_prop = 1.0 - sum;
+    if (last_prop < 0.0 || last_prop > 1.0) return 1e10;
+    
+    double error_rate = x[sparse_em_data->n_genomes - 1];
+    if (error_rate < 0.0 || error_rate > 1.0) return 1e10;
+    
+    // Copy valid parameters
+    for (int i = 0; i < sparse_em_data->n_genomes - 1; i++) {
+        sparse_em_data->proportions[i] = x[i];
+    }
+    sparse_em_data->proportions[sparse_em_data->n_genomes - 1] = last_prop;
+    sparse_em_data->error_rate = error_rate;
+    
+    // Removed: sparse_normalize_proportions - parameters already valid
+    
+    sparse_calcQ_method_CE(sparse_em_data);
+    return -sparse_calculate_log_likelihood(sparse_em_data);
+}
+
+// Sparse fixed-point function for Method CED
+void sparse_fixed_point_CED(double *x, double *fx, void *params) {
+    sparse_em_data_t *sparse_em_data = (sparse_em_data_t*)params;
+    
+    double sum = 0.0;
+    for (int i = 0; i < sparse_em_data->n_genomes - 1; i++) {
+        sparse_em_data->proportions[i] = x[i];
+        sum += x[i];
+    }
+    sparse_em_data->proportions[sparse_em_data->n_genomes - 1] = 
+        1.0 - sum;
+    sparse_em_data->error_rate = x[sparse_em_data->n_genomes - 1];
+    sparse_em_data->damage_rate = x[sparse_em_data->n_genomes];
+    
+    sparse_normalize_proportions(sparse_em_data->proportions, sparse_em_data->n_genomes);
+    
+    sparse_calcQ_method_CED(sparse_em_data);
+    sparse_em_e_step(sparse_em_data);
+    sparse_em_m_step(sparse_em_data, METHOD_CED);
+    
+    for (int i = 0; i < sparse_em_data->n_genomes - 1; i++) {
+        fx[i] = sparse_em_data->proportions[i];
+    }
+    fx[sparse_em_data->n_genomes - 1] = sparse_em_data->error_rate;
+    fx[sparse_em_data->n_genomes] = sparse_em_data->damage_rate;
+}
+
+double sparse_objective_CED(double *x, void *params) {
+    sparse_em_data_t *sparse_em_data = (sparse_em_data_t*)params;
+    
+    // Bounds check
+    double sum = 0.0;
+    for (int i = 0; i < sparse_em_data->n_genomes - 1; i++) {
+        if (x[i] < 0.0 || x[i] > 1.0) return 1e10;
+        sum += x[i];
+    }
+    double last_prop = 1.0 - sum;
+    if (last_prop < 0.0 || last_prop > 1.0) return 1e10;
+    
+    double error_rate = x[sparse_em_data->n_genomes - 1];
+    if (error_rate < 0.0 || error_rate > 1.0) return 1e10;
+    
+    double damage_rate = x[sparse_em_data->n_genomes];
+    if (damage_rate < 0.0 || damage_rate > 1.0) return 1e10;
+    
+    // Copy valid parameters
+    for (int i = 0; i < sparse_em_data->n_genomes - 1; i++) {
+        sparse_em_data->proportions[i] = x[i];
+    }
+    sparse_em_data->proportions[sparse_em_data->n_genomes - 1] = last_prop;
+    sparse_em_data->error_rate = error_rate;
+    sparse_em_data->damage_rate = damage_rate;
+    
+    // Removed: sparse_normalize_proportions - parameters already valid
+    
+    sparse_calcQ_method_CED(sparse_em_data);
+    return -sparse_calculate_log_likelihood(sparse_em_data);
+}
+
+// Sparse fixed-point function for Method CEfull (per-genome error rates, fixed damage)
+void sparse_fixed_point_CEfull(double *x, double *fx, void *params) {
+    sparse_em_data_t *sparse_em_data = (sparse_em_data_t*)params;
+    
+    // Unpack parameters: first K-1 proportions, then K error rates
+    double sum = 0.0;
+    for (int i = 0; i < sparse_em_data->n_genomes - 1; i++) {
+        sparse_em_data->proportions[i] = x[i];
+        sum += x[i];
+    }
+    sparse_em_data->proportions[sparse_em_data->n_genomes - 1] = 1.0 - sum;
+    
+    for (int j = 0; j < sparse_em_data->n_genomes; j++) {
+        sparse_em_data->error_rates[j] = x[sparse_em_data->n_genomes - 1 + j];
+    }
+    
+    // Use active-aware normalization and bound rates
+    sparse_normalize_proportions_active(sparse_em_data->proportions, sparse_em_data->n_genomes,
+                                        sparse_em_data->active_genomes);
+    
+    // Bound error rates to [0,1]
+    for (int j = 0; j < sparse_em_data->n_genomes; j++) {
+        if (!sparse_em_data->active_genomes || sparse_em_data->active_genomes[j]) {
+            if (sparse_em_data->error_rates[j] < 0.0) sparse_em_data->error_rates[j] = 0.0;
+            if (sparse_em_data->error_rates[j] > 1.0) sparse_em_data->error_rates[j] = 1.0;
+        }
+    }
+    
+    // Run one iteration of EM
+    sparse_calcQ_method_CEfull(sparse_em_data);
+    sparse_em_e_step(sparse_em_data);
+    sparse_em_m_step(sparse_em_data, METHOD_CEFULL);
+    
+    // Pack results
+    for (int i = 0; i < sparse_em_data->n_genomes - 1; i++) {
+        fx[i] = sparse_em_data->proportions[i];
+    }
+    for (int j = 0; j < sparse_em_data->n_genomes; j++) {
+        fx[sparse_em_data->n_genomes - 1 + j] = sparse_em_data->error_rates[j];
+    }
+}
+
+double sparse_objective_CEfull(double *x, void *params) {
+    sparse_em_data_t *sparse_em_data = (sparse_em_data_t*)params;
+    
+    // Unpack parameters (don't reject invalid ones, normalize them instead)
+    double sum = 0.0;
+    for (int i = 0; i < sparse_em_data->n_genomes - 1; i++) {
+        sparse_em_data->proportions[i] = x[i];
+        sum += x[i];
+    }
+    sparse_em_data->proportions[sparse_em_data->n_genomes - 1] = 1.0 - sum;
+    
+    for (int j = 0; j < sparse_em_data->n_genomes; j++) {
+        sparse_em_data->error_rates[j] = x[sparse_em_data->n_genomes - 1 + j];
+    }
+    
+    // Normalize proportions and bound rates for Phase 2 with pruning
+    sparse_normalize_proportions_active(sparse_em_data->proportions, sparse_em_data->n_genomes,
+                                        sparse_em_data->active_genomes);
+    
+    // Bound error rates to [0,1]
+    for (int j = 0; j < sparse_em_data->n_genomes; j++) {
+        if (!sparse_em_data->active_genomes || sparse_em_data->active_genomes[j]) {
+            if (sparse_em_data->error_rates[j] < 0.0) sparse_em_data->error_rates[j] = 0.0;
+            if (sparse_em_data->error_rates[j] > 1.0) sparse_em_data->error_rates[j] = 1.0;
+        }
+    }
+    
+    sparse_calcQ_method_CEfull(sparse_em_data);
+    return -sparse_calculate_log_likelihood(sparse_em_data);
+}
+
+// Sparse fixed-point function for Method CEDfull (per-genome error and damage rates)
+void sparse_fixed_point_CEDfull(double *x, double *fx, void *params) {
+    sparse_em_data_t *sparse_em_data = (sparse_em_data_t*)params;
+    
+    if (sparse_em_data->n_taxonomic_groups > 0) {
+        // NEW: Unified proportions approach (genome + taxonomic)
+        double sum = 0.0;
+        int n_unified_props = sparse_em_data->n_total_entities - 1;
+        
+        // Unpack unified proportions from SQUAREM parameter vector
+        for (int i = 0; i < n_unified_props; i++) {
+            sparse_em_data->unified_proportions[i] = x[i];
+            sum += x[i];
+        }
+        sparse_em_data->unified_proportions[n_unified_props] = 1.0 - sum;  // Last proportion
+
+        // BUGFIX: Clamp negative proportions to epsilon (SQUAREM extrapolation can create invalid values)
+        // This is necessary because the Dirichlet prior requires π > 0
+        double epsilon = 1e-10;
+        int n_clamped = 0;
+        for (int i = 0; i <= n_unified_props; i++) {
+            if (sparse_em_data->unified_proportions[i] <= 0.0) {
+                sparse_em_data->unified_proportions[i] = epsilon;
+                n_clamped++;
+            }
+        }
+
+        // Renormalize to sum to 1.0 if any clamping occurred
+        if (n_clamped > 0) {
+            double new_sum = 0.0;
+            for (int i = 0; i <= n_unified_props; i++) {
+                new_sum += sparse_em_data->unified_proportions[i];
+            }
+            for (int i = 0; i <= n_unified_props; i++) {
+                sparse_em_data->unified_proportions[i] /= new_sum;
+            }
+        }
+
+        // Copy unified proportions to separate arrays for M-step compatibility
+        for (int j = 0; j < sparse_em_data->n_genomes; j++) {
+            sparse_em_data->proportions[j] = sparse_em_data->unified_proportions[j];
+        }
+        
+        for (int t = 0; t < sparse_em_data->n_taxonomic_groups; t++) {
+            sparse_em_data->taxonomic_proportions[t] = sparse_em_data->unified_proportions[sparse_em_data->n_genomes + t];
+        }
+
+
+        // Unpack error and damage rates for all entities
+        int rate_offset = n_unified_props;
+        int total_entities = sparse_em_data->n_total_entities;
+
+        // Unpack error rates
+        for (int j = 0; j < total_entities; j++) {
+            sparse_em_data->error_rates[j] = x[rate_offset + j];
+        }
+
+        // Unpack damage rates (mode-dependent)
+        if (sparse_em_data->joint_damage_rate == 1) {
+            // JOINT mode: unpack shared damage rate and broadcast
+            sparse_em_data->shared_damage_rate = x[rate_offset + total_entities];
+            for (int j = 0; j < total_entities; j++) {
+                sparse_em_data->damage_rates[j] = sparse_em_data->shared_damage_rate;
+            }
+        } else {
+            // SEPARATE mode: unpack all damage rates
+            for (int j = 0; j < total_entities; j++) {
+                sparse_em_data->damage_rates[j] = x[rate_offset + total_entities + j];
+            }
+        }
+
+        // Bound error and damage rates to [0,1]
+        for (int j = 0; j < sparse_em_data->n_genomes; j++) {
+            if (sparse_em_data->active_genomes && sparse_em_data->active_genomes[j]) {
+                if (sparse_em_data->error_rates[j] < 0.0) sparse_em_data->error_rates[j] = 0.0;
+                if (sparse_em_data->error_rates[j] > 1.0) sparse_em_data->error_rates[j] = 1.0;
+                if (sparse_em_data->damage_rates[j] < 0.0) sparse_em_data->damage_rates[j] = 0.0;
+                if (sparse_em_data->damage_rates[j] > 1.0) sparse_em_data->damage_rates[j] = 1.0;
+            }
+        }
+
+        // Also bound taxonomic group error and damage rates
+        for (int t = 0; t < sparse_em_data->n_taxonomic_groups; t++) {
+            int unified_idx = sparse_em_data->n_genomes + t;
+            if (sparse_em_data->unified_active_entities && sparse_em_data->unified_active_entities[unified_idx]) {
+                if (sparse_em_data->error_rates[unified_idx] < 0.0) sparse_em_data->error_rates[unified_idx] = 0.0;
+                if (sparse_em_data->error_rates[unified_idx] > 1.0) sparse_em_data->error_rates[unified_idx] = 1.0;
+                if (sparse_em_data->damage_rates[unified_idx] < 0.0) sparse_em_data->damage_rates[unified_idx] = 0.0;
+                if (sparse_em_data->damage_rates[unified_idx] > 1.0) sparse_em_data->damage_rates[unified_idx] = 1.0;
+            }
+        }
+
+        // Restore fixed parameters (equality constraints)
+        if (sparse_em_data->error_rate_fixed_mask) {
+            for (int j = 0; j < total_entities; j++) {
+                if (sparse_em_data->error_rate_fixed_mask[j]) {
+                    sparse_em_data->error_rates[j] = sparse_em_data->error_rate_fixed_values[j];
+                }
+            }
+        }
+
+        // Run EM iteration - M-step will do joint normalization
+        // BUGFIX: Use correct Q function for taxonomic groups
+        if (sparse_em_data->n_taxonomic_groups > 0) {
+            sparse_calcQ_method_CEDfull_simple(sparse_em_data);
+        } else {
+            sparse_calcQ_method_CEDfull(sparse_em_data);
+        }
+        sparse_em_e_step(sparse_em_data);
+        
+        // DEBUG: Check W_taxonomic values after E-step
+        if (sparse_em_data->W_taxonomic_sparse && sparse_em_data->n_taxonomic_entries > 5) {
+            // DEBUG printf arguments removed
+        // DEBUG printf arguments removed
+        }
+        
+        // DEBUG: Check proportions BEFORE M-step
+        for (int t = 0; t < sparse_em_data->n_taxonomic_groups; t++) {
+            // Debug output removed
+        }
+        
+        // DEBUG: Check if taxonomic data structures are intact
+        // DEBUG printf arguments removed
+        if (sparse_em_data->W_taxonomic_sparse && sparse_em_data->n_taxonomic_entries > 0) {
+            // DEBUG printf arguments removed
+        }
+        
+        sparse_em_m_step(sparse_em_data, METHOD_CEDFULL);
+
+        // DEBUG: Check proportions after M-step
+        // Debug proportion output removed
+
+        // Copy results back to unified array
+        for (int j = 0; j < sparse_em_data->n_genomes; j++) {
+            sparse_em_data->unified_proportions[j] = sparse_em_data->proportions[j];
+        }
+        for (int t = 0; t < sparse_em_data->n_taxonomic_groups; t++) {
+            sparse_em_data->unified_proportions[sparse_em_data->n_genomes + t] = sparse_em_data->taxonomic_proportions[t];
+        }
+
+        // BUGFIX: Clamp negative proportions from M-step with α < 1 before packing
+        // The M-step with Dirichlet prior can produce negative proportions
+        n_clamped = 0;
+        for (int i = 0; i <= n_unified_props; i++) {
+            if (sparse_em_data->unified_proportions[i] <= 0.0) {
+                sparse_em_data->unified_proportions[i] = epsilon;
+                n_clamped++;
+            }
+        }
+
+        // Renormalize if any clamping occurred
+        if (n_clamped > 0) {
+            double new_sum = 0.0;
+            for (int i = 0; i <= n_unified_props; i++) {
+                new_sum += sparse_em_data->unified_proportions[i];
+            }
+            for (int i = 0; i <= n_unified_props; i++) {
+                sparse_em_data->unified_proportions[i] /= new_sum;
+            }
+
+            // Copy clamped values back to separate arrays
+            for (int j = 0; j < sparse_em_data->n_genomes; j++) {
+                sparse_em_data->proportions[j] = sparse_em_data->unified_proportions[j];
+            }
+            for (int t = 0; t < sparse_em_data->n_taxonomic_groups; t++) {
+                sparse_em_data->taxonomic_proportions[t] = sparse_em_data->unified_proportions[sparse_em_data->n_genomes + t];
+            }
+        }
+
+        // Pack unified proportions back to SQUAREM
+        for (int i = 0; i < n_unified_props; i++) {
+            fx[i] = sparse_em_data->unified_proportions[i];
+        }
+
+        // Pack error rates
+        for (int j = 0; j < total_entities; j++) {
+            fx[rate_offset + j] = sparse_em_data->error_rates[j];
+        }
+
+        // Pack damage rates (mode-dependent)
+        if (sparse_em_data->joint_damage_rate == 1) {
+            // JOINT mode: pack single shared damage rate
+            fx[rate_offset + total_entities] = sparse_em_data->shared_damage_rate;
+        } else {
+            // SEPARATE mode: pack all damage rates
+            for (int j = 0; j < total_entities; j++) {
+                fx[rate_offset + total_entities + j] = sparse_em_data->damage_rates[j];
+            }
+        }
+
+    } else {
+        // ORIGINAL: genome-only logic (unchanged for backward compatibility)
+        double sum = 0.0;
+        for (int i = 0; i < sparse_em_data->n_genomes - 1; i++) {
+            sparse_em_data->proportions[i] = x[i];
+            sum += x[i];
+        }
+        sparse_em_data->proportions[sparse_em_data->n_genomes - 1] = 1.0 - sum;
+
+        // Unpack error rates
+        for (int j = 0; j < sparse_em_data->n_genomes; j++) {
+            sparse_em_data->error_rates[j] = x[sparse_em_data->n_genomes - 1 + j];
+        }
+
+        // Unpack damage rates (mode-dependent)
+        if (sparse_em_data->joint_damage_rate == 1) {
+            // JOINT mode: unpack shared damage rate and broadcast
+            sparse_em_data->shared_damage_rate = x[2 * sparse_em_data->n_genomes - 1];
+            for (int j = 0; j < sparse_em_data->n_genomes; j++) {
+                sparse_em_data->damage_rates[j] = sparse_em_data->shared_damage_rate;
+            }
+        } else {
+            // SEPARATE mode: unpack all damage rates
+            for (int j = 0; j < sparse_em_data->n_genomes; j++) {
+                sparse_em_data->damage_rates[j] = x[2 * sparse_em_data->n_genomes - 1 + j];
+            }
+        }
+
+        // Add safety check before genome-only normalization
+        check_taxonomic_normalization_violation(sparse_em_data, "sparse_fixed_point_CEDfull");
+        sparse_normalize_proportions_active(sparse_em_data->proportions, sparse_em_data->n_genomes, 
+                                            sparse_em_data->active_genomes);
+        
+        for (int j = 0; j < sparse_em_data->n_genomes; j++) {
+            if (sparse_em_data->active_genomes && sparse_em_data->active_genomes[j]) {
+                if (sparse_em_data->error_rates[j] < 0.0) sparse_em_data->error_rates[j] = 0.0;
+                if (sparse_em_data->error_rates[j] > 1.0) sparse_em_data->error_rates[j] = 1.0;
+                if (sparse_em_data->damage_rates[j] < 0.0) sparse_em_data->damage_rates[j] = 0.0;
+                if (sparse_em_data->damage_rates[j] > 1.0) sparse_em_data->damage_rates[j] = 1.0;
+            }
+        }
+
+        // Restore fixed parameters (equality constraints)
+        if (sparse_em_data->error_rate_fixed_mask) {
+            for (int j = 0; j < sparse_em_data->n_genomes; j++) {
+                if (sparse_em_data->error_rate_fixed_mask[j]) {
+                    sparse_em_data->error_rates[j] = sparse_em_data->error_rate_fixed_values[j];
+                }
+            }
+        }
+
+        sparse_calcQ_method_CEDfull(sparse_em_data);
+        sparse_em_e_step(sparse_em_data);
+        sparse_em_m_step(sparse_em_data, METHOD_CEDFULL);
+        
+        for (int i = 0; i < sparse_em_data->n_genomes - 1; i++) {
+            fx[i] = sparse_em_data->proportions[i];
+        }
+
+        // Pack error rates
+        for (int j = 0; j < sparse_em_data->n_genomes; j++) {
+            fx[sparse_em_data->n_genomes - 1 + j] = sparse_em_data->error_rates[j];
+        }
+
+        // Pack damage rates (mode-dependent)
+        if (sparse_em_data->joint_damage_rate == 1) {
+            // JOINT mode: pack single shared damage rate
+            fx[2 * sparse_em_data->n_genomes - 1] = sparse_em_data->shared_damage_rate;
+        } else {
+            // SEPARATE mode: pack all damage rates
+            for (int j = 0; j < sparse_em_data->n_genomes; j++) {
+                fx[2 * sparse_em_data->n_genomes - 1 + j] = sparse_em_data->damage_rates[j];
+            }
+        }
+    }
+}
+
+double sparse_objective_CEDfull(double *x, void *params) {
+    sparse_em_data_t *sparse_em_data = (sparse_em_data_t*)params;
+
+    if (sparse_em_data->n_taxonomic_groups > 0) {
+        // NEW: Unified proportions approach (genome + taxonomic)
+        double sum = 0.0;
+        int n_unified_props = sparse_em_data->n_total_entities - 1;
+
+        // Unpack unified proportions from SQUAREM parameter vector
+        for (int i = 0; i < n_unified_props; i++) {
+            sparse_em_data->unified_proportions[i] = x[i];
+            sum += x[i];
+        }
+        sparse_em_data->unified_proportions[n_unified_props] = 1.0 - sum;
+
+        // BUGFIX: Clamp negative proportions to epsilon (SQUAREM extrapolation can create invalid values)
+        // This is necessary because the Dirichlet prior requires π > 0
+        double epsilon = 1e-10;
+        int n_clamped = 0;
+        for (int i = 0; i <= n_unified_props; i++) {
+            if (sparse_em_data->unified_proportions[i] <= 0.0) {
+                sparse_em_data->unified_proportions[i] = epsilon;
+                n_clamped++;
+            }
+        }
+
+        // Renormalize to sum to 1.0 if any clamping occurred
+        if (n_clamped > 0) {
+            double new_sum = 0.0;
+            for (int i = 0; i <= n_unified_props; i++) {
+                new_sum += sparse_em_data->unified_proportions[i];
+            }
+            for (int i = 0; i <= n_unified_props; i++) {
+                sparse_em_data->unified_proportions[i] /= new_sum;
+            }
+        }
+
+
+        // Copy unified proportions to separate arrays
+        for (int j = 0; j < sparse_em_data->n_genomes; j++) {
+            sparse_em_data->proportions[j] = sparse_em_data->unified_proportions[j];
+        }
+        for (int t = 0; t < sparse_em_data->n_taxonomic_groups; t++) {
+            sparse_em_data->taxonomic_proportions[t] = sparse_em_data->unified_proportions[sparse_em_data->n_genomes + t];
+        }
+
+        // Unpack error and damage rates for all entities
+        int rate_offset = n_unified_props;
+        int total_entities = sparse_em_data->n_total_entities;
+
+        // Unpack error rates
+        for (int j = 0; j < total_entities; j++) {
+            sparse_em_data->error_rates[j] = x[rate_offset + j];
+        }
+
+        // Unpack damage rates (mode-dependent)
+        if (sparse_em_data->joint_damage_rate == 1) {
+            // JOINT mode: unpack shared damage rate and broadcast
+            sparse_em_data->shared_damage_rate = x[rate_offset + total_entities];
+            for (int j = 0; j < total_entities; j++) {
+                sparse_em_data->damage_rates[j] = sparse_em_data->shared_damage_rate;
+            }
+        } else {
+            // SEPARATE mode: unpack all damage rates
+            for (int j = 0; j < total_entities; j++) {
+                sparse_em_data->damage_rates[j] = x[rate_offset + total_entities + j];
+            }
+        }
+
+        // Bound error and damage rates to [0,1]
+        for (int j = 0; j < sparse_em_data->n_genomes; j++) {
+            if (sparse_em_data->active_genomes && sparse_em_data->active_genomes[j]) {
+                if (sparse_em_data->error_rates[j] < 0.0) sparse_em_data->error_rates[j] = 0.0;
+                if (sparse_em_data->error_rates[j] > 1.0) sparse_em_data->error_rates[j] = 1.0;
+                if (sparse_em_data->damage_rates[j] < 0.0) sparse_em_data->damage_rates[j] = 0.0;
+                if (sparse_em_data->damage_rates[j] > 1.0) sparse_em_data->damage_rates[j] = 1.0;
+            }
+        }
+
+        // Also bound taxonomic group error and damage rates
+        for (int t = 0; t < sparse_em_data->n_taxonomic_groups; t++) {
+            int unified_idx = sparse_em_data->n_genomes + t;
+            if (sparse_em_data->unified_active_entities && sparse_em_data->unified_active_entities[unified_idx]) {
+                if (sparse_em_data->error_rates[unified_idx] < 0.0) sparse_em_data->error_rates[unified_idx] = 0.0;
+                if (sparse_em_data->error_rates[unified_idx] > 1.0) sparse_em_data->error_rates[unified_idx] = 1.0;
+                if (sparse_em_data->damage_rates[unified_idx] < 0.0) sparse_em_data->damage_rates[unified_idx] = 0.0;
+                if (sparse_em_data->damage_rates[unified_idx] > 1.0) sparse_em_data->damage_rates[unified_idx] = 1.0;
+            }
+        }
+
+        // Restore fixed parameters (equality constraints)
+        if (sparse_em_data->error_rate_fixed_mask) {
+            for (int j = 0; j < total_entities; j++) {
+                if (sparse_em_data->error_rate_fixed_mask[j]) {
+                    sparse_em_data->error_rates[j] = sparse_em_data->error_rate_fixed_values[j];
+                }
+            }
+        }
+
+    } else {
+        // ORIGINAL: genome-only logic (unchanged for backward compatibility)
+        double sum = 0.0;
+        for (int i = 0; i < sparse_em_data->n_genomes - 1; i++) {
+            sparse_em_data->proportions[i] = x[i];
+            sum += x[i];
+        }
+        sparse_em_data->proportions[sparse_em_data->n_genomes - 1] = 1.0 - sum;
+
+        // Unpack error rates
+        for (int j = 0; j < sparse_em_data->n_genomes; j++) {
+            sparse_em_data->error_rates[j] = x[sparse_em_data->n_genomes - 1 + j];
+        }
+
+        // Unpack damage rates (mode-dependent)
+        if (sparse_em_data->joint_damage_rate == 1) {
+            // JOINT mode: unpack shared damage rate and broadcast
+            sparse_em_data->shared_damage_rate = x[2 * sparse_em_data->n_genomes - 1];
+            for (int j = 0; j < sparse_em_data->n_genomes; j++) {
+                sparse_em_data->damage_rates[j] = sparse_em_data->shared_damage_rate;
+            }
+        } else {
+            // SEPARATE mode: unpack all damage rates
+            for (int j = 0; j < sparse_em_data->n_genomes; j++) {
+                sparse_em_data->damage_rates[j] = x[2 * sparse_em_data->n_genomes - 1 + j];
+            }
+        }
+
+        // Add safety check before genome-only normalization
+        check_taxonomic_normalization_violation(sparse_em_data, "sparse_objective_CEDfull");
+        sparse_normalize_proportions_active(sparse_em_data->proportions, sparse_em_data->n_genomes,
+                                            sparse_em_data->active_genomes);
+        
+        for (int j = 0; j < sparse_em_data->n_genomes; j++) {
+            if (sparse_em_data->active_genomes && sparse_em_data->active_genomes[j]) {
+                if (sparse_em_data->error_rates[j] < 0.0) sparse_em_data->error_rates[j] = 0.0;
+                if (sparse_em_data->error_rates[j] > 1.0) sparse_em_data->error_rates[j] = 1.0;
+                if (sparse_em_data->damage_rates[j] < 0.0) sparse_em_data->damage_rates[j] = 0.0;
+                if (sparse_em_data->damage_rates[j] > 1.0) sparse_em_data->damage_rates[j] = 1.0;
+            }
+        }
+
+        // Restore fixed parameters (equality constraints)
+        if (sparse_em_data->error_rate_fixed_mask) {
+            for (int j = 0; j < sparse_em_data->n_genomes; j++) {
+                if (sparse_em_data->error_rate_fixed_mask[j]) {
+                    sparse_em_data->error_rates[j] = sparse_em_data->error_rate_fixed_values[j];
+                }
+            }
+        }
+    }
+
+    // DEBUG: Track when objective function is called and Q is recalculated
+    static int obj_call_counter = 0;
+    obj_call_counter++;
+    static int debug_obj_calls = 0; // Set to 1 to enable detailed debugging
+    if (debug_obj_calls && obj_call_counter <= 20) {
+        fprintf(stderr, "[DEBUG OBJ CALL %d] sparse_objective_CEDfull called\n", obj_call_counter);
+        fprintf(stderr, "  Sample params: prop[0]=%.10f, error[0]=%.10f, damage[0]=%.10f\n",
+                sparse_em_data->proportions[0], sparse_em_data->error_rates[0],
+                sparse_em_data->damage_rates[0]);
+        fprintf(stderr, "  About to recalculate Q matrix...\n");
+    }
+
+    // BUGFIX: Use correct Q function for taxonomic groups
+    if (sparse_em_data->n_taxonomic_groups > 0) {
+        sparse_calcQ_method_CEDfull_simple(sparse_em_data);
+    } else {
+        sparse_calcQ_method_CEDfull(sparse_em_data);
+    }
+
+    // Calculate log-likelihood
+    double ll_total = sparse_calculate_log_likelihood(sparse_em_data);
+    double ll = -ll_total;
+    if (debug_obj_calls && obj_call_counter <= 20) {
+        fprintf(stderr, "  Result: obj=%.10f (LL=%.10f)\n", ll, -ll);
+    }
+    return ll;
+}
+
+// Data-driven initialization for sparse proportions
+void sparse_initialize_proportions_data_driven(sparse_em_data_t *sparse_em_data) {
+    if (!sparse_em_data || !sparse_em_data->proportions) return;
+    
+    const sparse_alignment_t *sparse = sparse_em_data->alignment_data;
+    
+    // First calculate Q matrix with current error rate using method A
+    sparse_calcQ_method_A(sparse_em_data);
+    
+    // Calculate average log-likelihood for each genome
+    double *avg_loglik = calloc(sparse->n_genomes, sizeof(double));
+    double *genome_counts = calloc(sparse->n_genomes, sizeof(double));
+    if (!avg_loglik || !genome_counts) {
+        // Fall back to uniform initialization
+        for (int j = 0; j < sparse->n_genomes; j++) {
+            sparse_em_data->proportions[j] = 1.0 / sparse->n_genomes;
+        }
+        free(avg_loglik);
+        free(genome_counts);
+        return;
+    }
+    
+    // Sum log-likelihoods for each genome across reads
+    for (int idx = 0; idx < sparse->nnz; idx++) {
+        int j = sparse->col_indices[idx];
+        avg_loglik[j] += safe_log(sparse_em_data->Q_sparse[idx] + EM_DOUBLE_MIN);
+        genome_counts[j] += 1.0;
+    }
+    
+    // Calculate average (divide by number of reads that align to each genome)
+    // For genomes with no alignments, use a very negative log-likelihood
+    for (int j = 0; j < sparse->n_genomes; j++) {
+        if (genome_counts[j] > 0) {
+            avg_loglik[j] /= genome_counts[j];
+        } else {
+            avg_loglik[j] = -1000.0;  // Very negative for unaligned genomes
+        }
+    }
+    
+    // Find maximum for numerical stability
+    double max_loglik = avg_loglik[0];
+    for (int j = 1; j < sparse->n_genomes; j++) {
+        if (avg_loglik[j] > max_loglik) {
+            max_loglik = avg_loglik[j];
+        }
+    }
+    
+    // Convert to weights and normalize
+    double sum_weights = 0.0;
+    for (int j = 0; j < sparse->n_genomes; j++) {
+        sparse_em_data->proportions[j] = safe_exp(avg_loglik[j] - max_loglik + 1.0);
+        sum_weights += sparse_em_data->proportions[j];
+    }
+    
+    // Normalize and add smoothing (90% data-driven + 10% uniform)
+    for (int j = 0; j < sparse->n_genomes; j++) {
+        sparse_em_data->proportions[j] = (sparse_em_data->proportions[j] / sum_weights) * 0.9 + 
+                                        0.1 / sparse->n_genomes;
+    }
+    
+    // Debug: print initial proportions
+    //for (int j = 0; j < sparse->n_genomes; j++) {
+    //    printf(" G%d=%.6f", j, sparse_em_data->proportions[j]);
+    //}
+    //printf("\n");
+    
+    free(avg_loglik);
+    free(genome_counts);
+}
+
+// Sparse-specific SQUAREM wrapper implementation
+squarem_result_t* sparse_squarem_wrapper(double *par, int n_params, fixptfn_t fixptfn, 
+                                       objfn_t objfn, void *data, squarem_control_t *control) {
+    if (!par || !fixptfn || !data || !control) return NULL;
+    
+    // Get sparse_em_data to access pruning parameters
+    sparse_em_data_t *sparse_em_data = (sparse_em_data_t*)data;
+    double min_proportion = sparse_em_data->min_proportion;
+    
+    squarem_result_t *result = squarem_result_create(n_params);
+    if (!result) return NULL;
+    
+    squarem_t *sq = squarem_create(n_params);
+    if (!sq) {
+        squarem_result_destroy(result);
+        return NULL;
+    }
+    
+    // Copy initial parameters
+    for (int i = 0; i < n_params; i++) {
+        sq->theta_0[i] = par[i];
+    }
+    
+    // Set step size parameters  
+    sq->step_min = control->step_min0;
+    sq->step_max = control->step_max0;
+    sq->mstep = control->mstep;
+    sq->objfn_inc = control->objfn_inc;
+    
+    double obj_old = objfn ? objfn(sq->theta_0, data) : 0.0;
+
+    printf("Starting SQUAREM iterations (max %d)...\n", control->maxiter);
+    fflush(stdout);
+    
+    for (int iter = 0; iter < control->maxiter; iter++) {
+        // Skip reporting iteration 0 (transition artifact), then show first 5 and every 10th
+        if (iter > 0 && (iter < 6 || iter % 10 == 0)) {
+            // Calculate current likelihood for accurate progress reporting
+            double current_obj = objfn ? objfn(sq->theta_0, data) : 0.0;
+            printf("Iteration %d: log-likelihood = %.6f\n", iter, -current_obj);
+            fflush(stdout);
+        } else if (control->trace && iter > 0) {
+            // Verbose mode shows every iteration except 0
+            double current_ll = objfn ? -objfn(sq->theta_0, data) : 0.0;
+            printf("  [Verbose] SQUAREM iter %d: log-likelihood = %.6f | params =", iter, current_ll);
+            // Show first few proportions and error rates
+            int show_params = (n_params > 10) ? 10 : n_params;
+            for (int i = 0; i < show_params; i++) {
+                printf(" %.6f", sq->theta_0[i]);
+            }
+            if (n_params > 10) printf(" ...");
+            printf("\n");
+        }
+        
+        // Standard EM steps
+        fixptfn(sq->theta_0, sq->theta_1, data);
+
+        // Check if we should prune after first EM step
+        if (min_proportion > 0.0 && should_prune_at_iteration(iter + 1)) {
+            // Update proportions in sparse_em_data from theta_1
+            // (proportions are the first n_genomes-1 parameters)
+            double sum = 0.0;
+            for (int i = 0; i < sparse_em_data->n_genomes - 1; i++) {
+                sparse_em_data->proportions[i] = sq->theta_1[i];
+                sum += sq->theta_1[i];
+            }
+            sparse_em_data->proportions[sparse_em_data->n_genomes - 1] = 1.0 - sum;
+            
+            // Perform pruning
+            sparse_prune_genomes_and_reads(sparse_em_data, min_proportion);
+        }
+        
+        fixptfn(sq->theta_1, sq->theta_2, data);
+
+        
+        // Calculate residual vectors
+        for (int i = 0; i < n_params; i++) {
+            sq->r_vec[i] = sq->theta_1[i] - sq->theta_0[i];
+            sq->v_vec[i] = sq->theta_2[i] - sq->theta_1[i];
+        }
+        
+        // Check convergence
+        double q1_norm = 0.0, q2_norm = 0.0;
+        for (int i = 0; i < n_params; i++) {
+            q1_norm += sq->r_vec[i] * sq->r_vec[i];
+            q2_norm += sq->v_vec[i] * sq->v_vec[i];
+        }
+        q1_norm = sqrt(q1_norm);
+        q2_norm = sqrt(q2_norm);
+        
+        if (q1_norm < control->tol) {
+            for (int i = 0; i < n_params; i++) {
+                result->par[i] = sq->theta_1[i];
+            }
+            result->iter = iter + 1;
+            result->convergence = 0;
+            if (objfn) result->value = objfn(result->par, data);
+            break;
+        }
+        
+        if (q2_norm < control->tol) {
+            for (int i = 0; i < n_params; i++) {
+                result->par[i] = sq->theta_2[i];
+            }
+            result->iter = iter + 1;
+            result->convergence = 0;
+            if (objfn) result->value = objfn(result->par, data);
+            break;
+        }
+        
+        // SQUAREM extrapolation
+        double sv2 = 0.0, srv = 0.0;
+        for (int i = 0; i < n_params; i++) {
+            double diff = sq->v_vec[i] - sq->r_vec[i];
+            sv2 += diff * diff;
+            srv += sq->r_vec[i] * diff;
+        }
+
+        double alpha = (sv2 > 0.0) ? fabs(-srv / sv2) : 1.0;
+        alpha = fmax(sq->step_min, fmin(sq->step_max, alpha));
+
+        // Calculate extrapolated parameters
+        for (int i = 0; i < n_params; i++) {
+            sq->theta_new[i] = sq->theta_0[i] + 2.0 * alpha * sq->r_vec[i] + 
+                              alpha * alpha * (sq->v_vec[i] - sq->r_vec[i]);
+        }
+        
+        // Debug extrapolation (removed to reduce output)
+
+        // Check for invalid extrapolation
+        int invalid = 0;
+        for (int i = 0; i < n_params; i++) {
+            if (isnan(sq->theta_new[i]) || isinf(sq->theta_new[i])) {
+                invalid = 1;
+                break;
+            }
+        }
+
+        if (invalid) {
+            for (int i = 0; i < n_params; i++) {
+                sq->theta_new[i] = sq->theta_2[i];
+            }
+            sq->step_max = fmax(control->step_max0, sq->step_max / sq->mstep);
+        }
+
+        // Check objective function
+        if (objfn && !invalid) {
+            double obj_new = objfn(sq->theta_new, data);
+
+            if (obj_new > obj_old + control->objfn_inc) {
+                // theta_new rejected, fall back to theta_2 unconditionally
+                // NOTE: We don't check if theta_2 is acceptable because with Dirichlet
+                // prior α < 1 and clamping, both theta_new and theta_2 may increase
+                // the objective slightly. Accepting theta_2 anyway allows progress.
+                for (int i = 0; i < n_params; i++) {
+                    sq->theta_0[i] = sq->theta_2[i];
+                }
+                obj_old = objfn(sq->theta_0, data);
+
+                sq->step_max = fmax(control->step_max0, sq->step_max / sq->mstep);
+            } else {
+                for (int i = 0; i < n_params; i++) {
+                    sq->theta_0[i] = sq->theta_new[i];
+                }
+                obj_old = obj_new;
+
+            }
+        } else {
+            for (int i = 0; i < n_params; i++) {
+                sq->theta_0[i] = invalid ? sq->theta_2[i] : sq->theta_new[i];
+            }
+            // Update obj_old when we have an objective function
+            if (objfn) {
+                // Always recalculate since we're outside the obj_new scope
+                obj_old = objfn(sq->theta_0, data);
+            }
+        }
+        
+        // Update step bounds
+        if (!invalid) {
+            sq->step_max = sq->step_max * sq->mstep;
+            if (sq->step_min < 0) {
+                sq->step_min = sq->step_min * sq->mstep;
+            }
+        }
+    }
+    
+    // If didn't converge
+    if (result->convergence != 0) {
+        for (int i = 0; i < n_params; i++) {
+            result->par[i] = sq->theta_0[i];
+        }
+        result->iter = control->maxiter;
+        result->convergence = 1;
+        if (objfn) result->value = objfn(result->par, data);
+    }
+    
+    squarem_destroy(sq);
+    return result;
+}
+
+// Sparse-specific SQUAREM wrapper without pruning (for phase 2)
+squarem_result_t* sparse_squarem_wrapper_no_pruning(double *par, int n_params, fixptfn_t fixptfn, 
+                                       objfn_t objfn, void *data, squarem_control_t *control) {
+    if (!par || !fixptfn || !data || !control) return NULL;
+    
+    squarem_result_t *result = squarem_result_create(n_params);
+    if (!result) return NULL;
+    
+    squarem_t *sq = squarem_create(n_params);
+    if (!sq) {
+        squarem_result_destroy(result);
+        return NULL;
+    }
+    
+    // Copy initial parameters
+    for (int i = 0; i < n_params; i++) {
+        sq->theta_0[i] = par[i];
+    }
+    
+    // Set step size parameters  
+    sq->step_min = control->step_min0;
+    sq->step_max = control->step_max0;
+    sq->mstep = control->mstep;
+    sq->objfn_inc = control->objfn_inc;
+    
+    double obj_old = objfn ? objfn(sq->theta_0, data) : 0.0;
+
+    printf("Starting Phase 2 SQUAREM iterations (max %d)...\n", control->maxiter);
+    fflush(stdout);
+
+    for (int iter = 0; iter < control->maxiter; iter++) {
+        // Skip reporting iteration 0 (transition artifact), then show first 5 and every 10th
+        if (iter > 0 && (iter < 6 || iter % 10 == 0)) {
+            // Calculate current likelihood for accurate progress reporting
+            double current_obj = objfn ? objfn(sq->theta_0, data) : 0.0;
+            printf("  Phase 2 iteration %d: log-likelihood = %.6f\n", iter, -current_obj);
+            fflush(stdout);
+        }
+        
+        if (control->trace) {
+            // Verbose mode shows every iteration
+            double current_ll = objfn ? -objfn(sq->theta_0, data) : 0.0;
+            printf("  [Verbose] Phase 2 SQUAREM iter %d: log-likelihood = %.6f | params =", iter, current_ll);
+            // Show first few proportions and error rates
+            int show_params = (n_params > 10) ? 10 : n_params;
+            for (int i = 0; i < show_params; i++) {
+                printf(" %.6f", sq->theta_0[i]);
+            }
+            if (n_params > 10) printf(" ...");
+            printf("\n");
+        }
+        
+        // Standard EM steps (NO PRUNING)
+        fixptfn(sq->theta_0, sq->theta_1, data);
+        fixptfn(sq->theta_1, sq->theta_2, data);
+
+        // Calculate residual vectors
+        for (int i = 0; i < n_params; i++) {
+            sq->r_vec[i] = sq->theta_1[i] - sq->theta_0[i];
+            sq->v_vec[i] = sq->theta_2[i] - sq->theta_1[i];
+        }
+        
+        // Check convergence
+        double q1_norm = 0.0, q2_norm = 0.0;
+        for (int i = 0; i < n_params; i++) {
+            q1_norm += sq->r_vec[i] * sq->r_vec[i];
+            q2_norm += sq->v_vec[i] * sq->v_vec[i];
+        }
+        q1_norm = sqrt(q1_norm);
+        q2_norm = sqrt(q2_norm);
+        
+        if (q1_norm < control->tol) {
+            for (int i = 0; i < n_params; i++) {
+                result->par[i] = sq->theta_1[i];
+            }
+            result->iter = iter + 1;
+            result->convergence = 0;
+            if (objfn) result->value = objfn(result->par, data);
+            break;
+        }
+        
+        if (q2_norm < control->tol) {
+            for (int i = 0; i < n_params; i++) {
+                result->par[i] = sq->theta_2[i];
+            }
+            result->iter = iter + 1;
+            result->convergence = 0;
+            if (objfn) result->value = objfn(result->par, data);
+            break;
+        }
+        
+        // SQUAREM extrapolation
+        double sv2 = 0.0, srv = 0.0;
+        for (int i = 0; i < n_params; i++) {
+            double diff = sq->v_vec[i] - sq->r_vec[i];
+            sv2 += diff * diff;
+            srv += sq->r_vec[i] * diff;
+        }
+        
+        double alpha = (sv2 > 0.0) ? fabs(-srv / sv2) : 1.0;
+        alpha = fmax(sq->step_min, fmin(sq->step_max, alpha));
+
+        // Calculate extrapolated parameters
+        for (int i = 0; i < n_params; i++) {
+            sq->theta_new[i] = sq->theta_0[i] + 2.0 * alpha * sq->r_vec[i] +
+                              alpha * alpha * (sq->v_vec[i] - sq->r_vec[i]);
+        }
+
+        // Check for invalid extrapolation
+        int invalid = 0;
+        for (int i = 0; i < n_params; i++) {
+            if (isnan(sq->theta_new[i]) || isinf(sq->theta_new[i])) {
+                invalid = 1;
+                break;
+            }
+        }
+        
+        if (invalid) {
+            for (int i = 0; i < n_params; i++) {
+                sq->theta_new[i] = sq->theta_2[i];
+            }
+            sq->step_max = fmax(control->step_max0, sq->step_max / sq->mstep);
+        }
+        
+        // Check objective function
+        if (objfn && !invalid) {
+            double obj_new = objfn(sq->theta_new, data);
+
+            if (obj_new > obj_old + control->objfn_inc) {
+                // theta_new rejected, fall back to theta_2 unconditionally
+                // NOTE: We don't check if theta_2 is acceptable because with Dirichlet
+                // prior α < 1 and clamping, both theta_new and theta_2 may increase
+                // the objective slightly. Accepting theta_2 anyway allows progress.
+                for (int i = 0; i < n_params; i++) {
+                    sq->theta_0[i] = sq->theta_2[i];
+                }
+                obj_old = objfn(sq->theta_0, data);
+
+                sq->step_max = fmax(control->step_max0, sq->step_max / sq->mstep);
+            } else {
+                for (int i = 0; i < n_params; i++) {
+                    sq->theta_0[i] = sq->theta_new[i];
+                }
+                obj_old = obj_new;
+
+            }
+        } else {
+            for (int i = 0; i < n_params; i++) {
+                sq->theta_0[i] = invalid ? sq->theta_2[i] : sq->theta_new[i];
+            }
+            // Update obj_old when we have an objective function
+            if (objfn) {
+                // Always recalculate since we're outside the obj_new scope
+                obj_old = objfn(sq->theta_0, data);
+            }
+        }
+        
+        // Update step bounds
+        if (!invalid) {
+            sq->step_max = sq->step_max * sq->mstep;
+            if (sq->step_min < 0) {
+                sq->step_min = sq->step_min * sq->mstep;
+            }
+        }
+    }
+    
+    // If didn't converge
+    if (result->convergence != 0) {
+        for (int i = 0; i < n_params; i++) {
+            result->par[i] = sq->theta_0[i];
+        }
+        result->iter = control->maxiter;
+        result->convergence = 1;
+        if (objfn) result->value = objfn(result->par, data);
+    }
+    
+    squarem_destroy(sq);
+    return result;
+}

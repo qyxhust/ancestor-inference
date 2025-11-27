@@ -4,7 +4,10 @@ project:
   simulate_vcfs: "/space/s1/qyx/data/simulate/truth.vcf.gz"
   simulate_vcf_idx: "/space/s1/qyx/data/simulate/truth.vcf.gz.tbi"
   reads : "/space/s1/qyx/data/reads"
-
+  ref_haps: "/space/s1/qyx/data/ref_haps.fa"
+  ref_samples: "/space/s1/qyx/data/ref_samples.csv"
+  test_samples: "/space/s1/qyx/data/test_samples.csv"
+  align: "/space/s1/qyx/data/align"
 
 msprime:
   N_perpop: 100

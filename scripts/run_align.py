@@ -1,23 +1,21 @@
 from src.align import EMAlignment
+import yaml
+from pathlib import Path
 
 def run_align():
+    cfg = yaml.safe_load(Path("config/default.yaml").read_text())
+
+    ref_fasta = cfg["project"]["ref_haps"]
+    test_samples_csv = cfg["project"]["test_samples"]
+    reads_root = cfg["project"]["reads"]
+    align_root = cfg["project"]["align"]
     # 75% 参考 hap 的 multi-FASTA
-    ref_fasta = "data/ref_haps.fa"
-
-    # 25% test 样本列表（有一列 sample）
-    test_samples_csv = "data/test_samples.csv"
-
-    # 单样本 reads 根目录：<reads_root>/<sample>/<sample>_R1.fq/_R2.fq
-    reads_root = "data/reads"
-
-    # 对齐 & EM 输入的输出目录
-    out_root = "data/align"
 
     aligner = EMAlignment(
         ref_fasta_path=ref_fasta,
         test_samples_csv=test_samples_csv,
         reads_root=reads_root,
-        out_root=out_root,
+        out_root=align_root,
     )
 
     # 1. 建 bowtie2 索引 + hap_index 表

@@ -1,0 +1,20 @@
+species < 0.01
+subspecies < 0.01
+genus < 0.03
+domain > 0.1
+phylum > 0.1
+subphylum > 0.1
+order > 0.1
+suborder > 0.1
+kingdom > 0.1
+class > 0.1
+subclass > 0.1
+superclass > 0.1
+family > 0.05
+subfamily > 0.05
+superfamily > 0.05
+no rank > 0.1
+cellular root > 0.1
+clade > 0.1
+tribe > 0.1
+subtribe > 0.1

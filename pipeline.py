@@ -18,15 +18,15 @@ from scripts.run_em import run_em_for_all_tests             # 你的函数，内
 
 
 def main():
-    # 1) 运行模拟，生成 VCF + 标签
-    run_simulate(model="admix")
-    print("[OK] Pipeline complete.")
+    # # 1) 运行模拟，生成 VCF + 标签
+    # run_simulate(model_type="hard")
+    # print("[OK] Pipeline complete.")
 
     # # 2) 分层划分样本
     # stratified_split_samples_pd(
-    #     meta_path="data/simulate/labels.tsv",
-    #     ref_out="data/ref_samples.csv",
-    #     test_out="data/test_samples.csv",
+    #     meta_path="/space/s1/qyx/data/simulate/labels.tsv",
+    #     ref_out="/space/s1/qyx/data/ref_samples.csv",
+    #     test_out="/space/s1/qyx/data/test_samples.csv",
     #     ref_ratio=0.75,
     #     seed=42,
     #     sep="\t",
@@ -51,7 +51,7 @@ def main():
     # print("[OK] Pooling complete.")
 
     # 5) 运行对齐，生成 EM 输入文件
-    # run_align()
+    run_align()
     # print("[OK] Alignment complete.")
 
     # 6) 运行 EM，生成最终结果

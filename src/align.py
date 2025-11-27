@@ -18,19 +18,18 @@ class EMAlignment(object):
         ref_fasta_path,
         test_samples_csv,
         reads_root,
-        out_root="data/align",
+        out_root,
         index_prefix=None,
     ):
         """
         ref_fasta_path : 参考 hap 的 multi-FASTA，例如 data/ref_haps/ref_haps.fa
-                         每条记录是一条 haplotype
+                        每条记录是一条 haplotype
         test_samples_csv : 包含一列 'sample' 的 CSV（你之前分好的 25% 样本列表）
         reads_root      : 单样本 reads 根目录：
-                             reads_root/<sample>/<sample>_R1.fq
-                             reads_root/<sample>/<sample>_R2.fq
+                            reads_root/<sample>/<sample>_R1.fq
+                            reads_root/<sample>/<sample>_R2.fq
         out_root        : 输出根目录：
-                             out_root/align/     存 BAM
-                             out_root/em_input/  存 EM TSV
+                            out_root/align/     存 BAM
         index_prefix    : bowtie2 索引前缀（默认= ref_fasta 去掉后缀再加 _index）
         """
         self.ref_fasta_path = Path(ref_fasta_path)
@@ -39,10 +38,8 @@ class EMAlignment(object):
 
         self.out_root = Path(out_root)
         self.align_dir = self.out_root / "bam"
-        self.em_dir = Path("data/em/")
         self.out_root.mkdir(parents=True, exist_ok=True)
         self.align_dir.mkdir(parents=True, exist_ok=True)
-        self.em_dir.mkdir(parents=True, exist_ok=True)
 
         if index_prefix is None:
             # e.g. data/ref_haps/ref_haps.fa -> data/ref_haps/ref_haps_index
@@ -169,83 +166,3 @@ class EMAlignment(object):
                 threads=threads,
             )
         return bam_paths
-
-    # ---------- 3. 从 BAM 生成 EM 输入 TSV ----------
-
-    def em_input_for_sample(self, sample_id, hap_index_df=None, bam_path=None):
-        """
-        从 <sample>.sorted.bam 中抽取：
-        sample_id, read_id, hap_index, d_ij, n_j
-
-        写到 out_root/em_input/<sample>_read_hap.tsv
-        """
-        if bam_path is None:
-            bam_path = self.align_dir / f"{sample_id}.sorted.bam"
-        bam_path = Path(bam_path)
-        if not bam_path.exists():
-            raise FileNotFoundError(f"BAM 不存在: {bam_path}")
-
-        # hap name -> index
-        if hap_index_df is None:
-            hap_index_csv = self.out_root / "ref_haps_index.csv"
-            if hap_index_csv.exists():
-                hap_index_df = pd.read_csv(hap_index_csv)
-            else:
-                hap_index_df = self.write_hap_index_table(hap_index_csv)
-        name_to_idx = dict(zip(hap_index_df["hap_id"], hap_index_df["hap_index"]))
-
-        out_tsv = self.em_dir / f"{sample_id}_read_hap.tsv"
-        with out_tsv.open("w") as fout:
-            fout.write("sample_id\tread_id\thap_index\td_ij\tn_j\n")
-
-            bam = pysam.AlignmentFile(str(bam_path), "rb")
-            for aln in bam.fetch(until_eof=True):
-                if aln.is_unmapped:
-                    continue
-
-                ref_name = bam.get_reference_name(aln.reference_id)
-                if ref_name not in name_to_idx:
-                    continue
-                hap_idx = name_to_idx[ref_name]
-
-                read_id = aln.query_name
-
-                # mismatch 数：NM tag
-                try:
-                    d_ij = aln.get_tag("NM")
-                except KeyError:
-                    d_ij = 0  # 占位
-
-                # 有效 read 长度：比对上的碱基数
-                n_j = aln.query_alignment_length
-                if not n_j:
-                    n_j = len(aln.query_sequence or "")
-
-                fout.write(
-                    f"{sample_id}\t{read_id}\t{hap_idx}\t{int(d_ij)}\t{int(n_j)}\n"
-                )
-
-            bam.close()
-
-        print(f"[OK] EM input for {sample_id} -> {out_tsv}")
-        return out_tsv
-
-    def em_input_all_samples(self, hap_index_df=None):
-        """
-        对所有 test 样本生成 EM 输入 TSV。
-        返回 {sample_id: tsv_path}。
-        """
-        if hap_index_df is None:
-            hap_index_csv = self.em_dir / "ref_haps_index.csv"
-            if hap_index_csv.exists():
-                hap_index_df = pd.read_csv(hap_index_csv)
-            else:
-                hap_index_df = self.write_hap_index_table(hap_index_csv)
-
-        paths = {}
-        for s in self.test_samples:
-            paths[s] = self.em_input_for_sample(
-                s,
-                hap_index_df=hap_index_df,
-            )
-        return paths

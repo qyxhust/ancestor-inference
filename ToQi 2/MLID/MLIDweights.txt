@@ -1,0 +1,4 @@
+species 0.01
+subspecies 0.01
+genus 0.05
+all_other 0.1
